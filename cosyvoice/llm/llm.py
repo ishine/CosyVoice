@@ -2666,28 +2666,35 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
         # 5. step by step decode
         if self.use_vllm:
             from vllm import SamplingParams, RequestOutput
-            sampling_params = SamplingParams(top_k=self.vllm_sample_params['top_k'],   # 外面传进来的sampling值是25
-                                             top_p=self.vllm_sample_params['top_p'],      # 默认1.0
-                                             temperature=self.vllm_sample_params['temperature'],  # 默认1.0
-                                             repetition_penalty=self.vllm_sample_params['repetition_penalty'],  # 默认1.0
-                                             stop_token_ids=self.stop_token_ids,
-                                             min_tokens=min_len,
-                                             max_tokens=max_len)
+            sampling_params = SamplingParams(
+                min_p=self.vllm_sample_params['min_p'],
+                top_k=self.vllm_sample_params['top_k'],  #
+                top_p=self.vllm_sample_params['top_p'],  # 默认1.0
+                temperature=self.vllm_sample_params['temperature'],  # 默认1.0
+                repetition_penalty=self.vllm_sample_params['repetition_penalty'],  # 默认1.0
+                stop_token_ids=self.stop_token_ids,
+                min_tokens=min_len,
+                max_tokens=max_len)
+
             with self.lock:
                 self.vllm.add_request(uuid, {
                     "prompt_embeds": lm_input.squeeze(0).to(torch.bfloat16).to(
                         lm_input.device)}, sampling_params)
                 self.vllm_output_queue[uuid] = queue.Queue()
             out_tokens = []
-            while True:
+            vllm_step_count = 0    # vllm step count
+            request_finished = False
+            while self.vllm.has_unfinished_requests():
                 with self.lock:
                     if self.vllm_output_queue[uuid].empty() is True:
                         request_outputs: List[RequestOutput] = self.vllm.step()
+                        vllm_step_count += 1
                         for request_output in request_outputs:
-                            top_ids = list(request_output.outputs[0].token_ids)[
-                                -1]
+                            top_ids = list(request_output.outputs[0].token_ids)[-1]
                             self.vllm_output_queue[
                                 request_output.request_id].put(top_ids)
+                            if request_output.finished:
+                                request_finished= True
                 if self.vllm_output_queue[uuid].empty() is False:
                     top_ids = self.vllm_output_queue[uuid].get()
                     if top_ids in self.stop_token_ids:
@@ -2697,6 +2704,15 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
                     out_tokens.append(top_ids)
                     if len(out_tokens) == max_len:
                         break
+
+                if vllm_step_count > max_len * 2:  # vllm.step() 设定为最大生成长度的2倍
+                    logger.warning(f"Terminating request {uuid}, vllm steps exceed max token len {max_len} * 2.")
+                    break
+                if request_finished:
+                    logger.warning(f"Terminating request {uuid} because request finished without stop token,"
+                                   f" self.vllm.has_unfinished_requests():{self.vllm.has_unfinished_requests()} ")
+                    break
+
                 time.sleep(0.001)
             with self.lock:
                 self.vllm_output_queue.pop(uuid)
