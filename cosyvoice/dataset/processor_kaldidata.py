@@ -18,7 +18,6 @@ import logging
 import random
 import torch
 import torchaudio
-import langid
 from pypinyin import pinyin, Style
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
@@ -353,10 +352,13 @@ def mix_text_pinyin(data, eng_frontend, detect_language,
                                  int(len(words) * char_mix_ratio))
             for id in idxs:
                 if detect_language(words[id]) == 'en':
+                    if words[id] in ",.?!，。？！’‘'":
+                        continue
                     try:
                         phoneme_result = eng_frontend.eng_to_phoneme(words[id])
                         words[id] = f"<{' '.join(phoneme_result[0][0])}>"
-                    except Exception:
+                    except Exception as e:
+                        logging.warning(f"--- Text: {ori_text} \nfrontend error: {e}")
                         continue
 
             text = ' '.join(words)

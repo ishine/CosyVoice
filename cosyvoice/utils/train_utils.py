@@ -40,8 +40,8 @@ from cosyvoice.dataset.dataset_kaldidata import Dataset as KaldiDataset
 from cosyvoice.dataset.dataset_jsondata import Dataset as JsonDataset
 import s3tokenizer
 from cosyvoice.speaker.speaker_encoder import SpeakerEmbedding
-sys.path.append('/data/megastore/Projects/DuJing/code/lam_tts/tts/acoustics/lamtts')
-from pretrained_models.yhcodecv1.test_api import CodecV1Infer
+# sys.path.append('/data/megastore/Projects/DuJing/code/lam_tts/tts/acoustics/lamtts')
+# from pretrained_models.yhcodecv1.test_api import CodecV1Infer
 
 
 def init_distributed(args):
@@ -439,9 +439,9 @@ def init_codec_and_embed_model(configs, rank=0):
     elif configs['codec_type'] == 's3tokenizer_v2':
         codec_model = s3tokenizer.load_model(
             'speech_tokenizer_v2_25hz', configs['s3tokenizer_ckpt'])
-    elif configs['codec_type'] == 'yhcodec_v1':
-        codec_model = CodecV1Infer(**configs['codec'])
-        codec_model.device = f"cuda:{rank}"
+    # elif configs['codec_type'] == 'yhcodec_v1':
+    #     codec_model = CodecV1Infer(**configs['codec'])
+    #     codec_model.device = f"cuda:{rank}"
 
     codec_model = codec_model.cuda(rank)
     codec_model = freeze(codec_model)
