@@ -352,7 +352,10 @@ def mix_text_pinyin(data, eng_frontend, detect_language,
                                  int(len(words) * char_mix_ratio))
             for id in idxs:
                 if detect_language(words[id]) == 'en':
-                    if words[id] in ",.?!，。？！’‘'":
+                    if words[id] in set([
+                        ".", "。", ",", "，", "?", "？", "!", "！", ":", "：",
+                        ";", "；", "、", "·", "…", "—", "-", "|", "~", "'",
+                        "/", "\"", "“", "”", "(", "（", ")", "）"]):
                         continue
                     try:
                         phoneme_result = eng_frontend.eng_to_phoneme(words[id])
