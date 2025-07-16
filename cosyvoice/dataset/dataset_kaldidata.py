@@ -16,6 +16,7 @@
 
 import random
 import os
+import re
 import math
 import logging
 from functools import partial
@@ -177,6 +178,8 @@ def Dataset(data_dir,
     utt2spk = {}
 
     def add_one_data(data_dir):
+        if isinstance(data_dir, list):
+            data_dir = data_dir[0]
         logging.info(f"Loading data: {data_dir}")
         assert os.path.exists(f"{data_dir}/wav.scp") # \
                # and os.path.exists(f"{data_dir}/text")
@@ -190,14 +193,24 @@ def Dataset(data_dir,
                 utt, wav = line[0], line[1]
                 utt2wav[utt] = wav
 
-        if os.path.exists(f"{data_dir}/text"):
-            with open(f"{data_dir}/text", 'r', encoding='utf-8') as f_text:
+        if os.path.exists(f"{data_dir}/text_punc"):
+            text_path = f"{data_dir}/text_punc"
+        else:
+            text_path = f"{data_dir}/text"
+        if os.path.exists(text_path):
+            with open(text_path, 'r', encoding='utf-8') as f_text:
                 for line in f_text:
                     line = line.strip().split(maxsplit=1)
                     if len(line) != 2:
                         continue
                     utt, text = line[0], line[1]
+                    # 第一步：处理标点**前没有空格**
+                    text = re.sub(r'(\S)([.,!?])', r'\1 \2', text)
+                    # 第二步：处理标点**后没有空格**
+                    text = re.sub(r'([.,!?])(\S)', r'\1 \2', text)
                     utt2text[utt] = text
+        else:
+            raise Exception(f"Error: {text_path} not found.")
 
         if os.path.exists(f"{data_dir}/utt2spk"):
             with open(f"{data_dir}/utt2spk", 'r', encoding='utf-8') as f_spk:

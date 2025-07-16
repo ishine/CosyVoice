@@ -447,7 +447,8 @@ def init_codec_and_embed_model(configs, rank=0):
     codec_model = freeze(codec_model)
 
     use_freeze_spkemb = configs.get('use_freeze_spkemb', True)
-    if use_freeze_spkemb:  # 使用离线的说话人向量提取模型，不和主干网络一起训练
+    use_embedding = configs.get('use_embedding', True)
+    if use_freeze_spkemb and use_embedding:  # 使用离线的说话人向量提取模型，不和主干网络一起训练
         spkemb_model = SpeakerEmbedding(
             ckpt_path=configs['speaker_encoder_ckpt']).cuda(rank)
         spkemb_model = freeze(spkemb_model)
@@ -498,7 +499,8 @@ def get_codec_and_spkemb(batch_dict, codec_model, spkemb_model, configs):
     else:
         configs['speaker_vectors'] = {}
     use_offline_uttemb = configs.get('use_offline_uttemb', False)
-    if spkemb_model is not None:
+    use_embedding = configs.get('use_embedding', True)
+    if spkemb_model is not None and use_embedding:
         speaker_vec_list = []
         spker_list = batch_dict['spks']
         utt_list = batch_dict['utts']

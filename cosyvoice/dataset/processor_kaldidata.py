@@ -18,6 +18,8 @@ import logging
 import random
 import torch
 import torchaudio
+import langid
+from pypinyin import pinyin, Style
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from librosa.filters import mel as librosa_mel_fn
@@ -318,6 +320,51 @@ def parse_embedding(data, normalize, mode='train'):
         if normalize:
             sample['utt_embedding'] = F.normalize(sample['utt_embedding'], dim=0)
             sample['spk_embedding'] = F.normalize(sample['spk_embedding'], dim=0)
+        yield sample
+
+def mix_text_pinyin(data, eng_frontend, detect_language,
+                    sentence_mix_ratio=0.5, char_mix_ratio=0.2,
+                    mode='train'):
+    """
+    replace some word of a sentence, into pinyin(Chinese), phoneme(English)
+    """
+    eng_frontend = eng_frontend()
+    for sample in data:
+        assert 'text' in sample
+        ori_text = sample['text']
+        # lang = langid.classify(ori_text)[0]
+        lang = detect_language(ori_text)
+        if lang == 'zh' and random.random() < sentence_mix_ratio:
+            words = list(ori_text)
+            # sample indexs
+            idxs = random.sample(range(len(words)),
+                                 int(len(words) * char_mix_ratio))
+            for id in idxs:
+                if detect_language(words[id]) == 'zh':
+                    py = pinyin(words[id], style=Style.TONE3, heteronym=True,
+                                neutral_tone_with_five=True)
+                    if len(py[0]) == 1:  # 不是多音字
+                        words[id] = f"<{py[0][0]}>"
+            text = ''.join(words)
+
+        elif lang == 'en' and random.random() < sentence_mix_ratio and eng_frontend is not None:
+            words = ori_text.split()
+            idxs = random.sample(range(len(words)),
+                                 int(len(words) * char_mix_ratio))
+            for id in idxs:
+                if detect_language(words[id]) == 'en':
+                    try:
+                        phoneme_result = eng_frontend.eng_to_phoneme(words[id])
+                        words[id] = f"<{' '.join(phoneme_result[0][0])}>"
+                    except Exception:
+                        continue
+
+            text = ' '.join(words)
+
+        else:
+            text = ori_text
+
+        sample['text'] = text
         yield sample
 
 

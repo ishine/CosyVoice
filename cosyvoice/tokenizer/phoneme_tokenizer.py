@@ -14,6 +14,7 @@
 
 import json
 import sys
+import os
 from cosyvoice.tokenizer.preprocess import extract_mandarin_only, extract_non_mandarin
 from cosyvoice.tokenizer.phoneme_frontend import get_frontend_result
 
@@ -149,3 +150,29 @@ class PhonemeTokenizer:
 def get_tokenizer(phoneme_dict="cosyvoice/tokenizer/assets/hnttsa_phoneme2id.json",
                   mode='train', use_pause_label=True):
     return PhonemeTokenizer(phoneme_dict, mode=mode, use_pause_label=use_pause_label)
+
+
+def get_eng_frontend():
+    TTS_root = "/data/megastore/Projects/DuJing/code/lam_tts"
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    sys.path.append(TTS_root)
+    from tts.frontend.text_frontend.eng_frontend import init_en_frontend
+    eng_frontend = init_en_frontend()
+    return eng_frontend
+
+def detect_language(text, zh2en_ratio=1.0):
+    '''
+    :param text:
+    :param zh2en_ratio:
+    :return: zh: chinese, en: english
+    '''
+    chinese = extract_mandarin_only(text)
+    non_chinese = extract_non_mandarin(text)
+    if len(non_chinese) == 0:
+        return 'zh'
+    len_zh = len(chinese)   # chinese chars
+    len_en = len(non_chinese.split(' '))  # english words
+    if len_zh / len_en > zh2en_ratio:
+        return 'zh'
+    else:
+        return 'en'
