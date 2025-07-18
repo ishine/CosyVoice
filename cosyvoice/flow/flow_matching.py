@@ -11,12 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import threading
+
 import torch
 import torch.nn.functional as F
 from cosyvoice.flow.components.flow_matching import BASECFM
 from cosyvoice.utils.common import set_all_random_seed
 import onnxruntime
+import tensorrt
 
 
 class ConditionalCFM(BASECFM):
@@ -91,35 +92,42 @@ class ConditionalCFM(BASECFM):
         # Or in future might add like a return_all_steps flag
         sol = []
 
-        # Do not use concat, it may cause memory format changed and trt infer with wrong results!
-        x_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
-        mask_in = torch.zeros([2, 1, x.size(2)], device=x.device, dtype=x.dtype)
-        mu_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
-        t_in = torch.zeros([2], device=x.device, dtype=x.dtype)
-        spks_in = torch.zeros([2, 80], device=x.device, dtype=x.dtype)
-        cond_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
-        for step in range(1, len(t_span)):
-            # Classifier-Free Guidance inference introduced in VoiceBox
-            x_in[:] = x
-            mask_in[:] = mask
-            mu_in[0] = mu
-            t_in[:] = t.unsqueeze(0)
-            spks_in[0] = spks
-            cond_in[0] = cond
-            dphi_dt = self.forward_estimator(
-                x_in, mask_in,
-                mu_in, t_in,
-                spks_in,
-                cond_in,
-                streaming
-            )
-            dphi_dt, cfg_dphi_dt = torch.split(dphi_dt, [x.size(0), x.size(0)], dim=0)
-            dphi_dt = ((1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt)
-            x = x + dt * dphi_dt
-            t = t + dt
-            sol.append(x)
-            if step < len(t_span) - 1:
-                dt = t_span[step + 1] - t
+        if isinstance(self.estimator, tensorrt.ICudaEngine):
+            trt_stream = torch.cuda.stream(self.stream)
+        else:
+            from contextlib import nullcontext
+            trt_stream = nullcontext
+        with trt_stream:   #TensorRT并发推理时，必须把多步采样放到特定cuda stream里面，不然不同进程间Trt推理会相互影响
+            # Do not use concat, it may cause memory format changed and trt infer with wrong results!
+            x_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
+            mask_in = torch.zeros([2, 1, x.size(2)], device=x.device, dtype=x.dtype)
+            mu_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
+            t_in = torch.zeros([2], device=x.device, dtype=x.dtype)
+            spks_in = torch.zeros([2, 80], device=x.device, dtype=x.dtype)
+            cond_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
+            for step in range(1, len(t_span)):
+                # Classifier-Free Guidance inference introduced in VoiceBox
+                x_in[:] = x
+                mask_in[:] = mask
+                mu_in[0] = mu
+                t_in[:] = t.unsqueeze(0)
+                spks_in[0] = spks
+                cond_in[0] = cond
+
+                dphi_dt = self.forward_estimator(
+                    x_in, mask_in,
+                    mu_in, t_in,
+                    spks_in,
+                    cond_in,
+                    streaming
+                )
+                dphi_dt, cfg_dphi_dt = torch.split(dphi_dt, [x.size(0), x.size(0)], dim=0)
+                dphi_dt = ((1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt)
+                x = x + dt * dphi_dt
+                t = t + dt
+                sol.append(x)
+                if step < len(t_span) - 1:
+                    dt = t_span[step + 1] - t
 
         return sol[-1].float()
 
@@ -138,7 +146,30 @@ class ConditionalCFM(BASECFM):
             output_onnx = self.estimator.run(None, ort_inputs)[0]
             return torch.from_numpy(output_onnx).to(x.device)
 
-        else:
+        elif isinstance(self.estimator, tensorrt.ICudaEngine):
+            with torch.cuda.stream(self.stream):
+                self.context.set_input_shape('x', (2, 80, x.size(2)))
+                self.context.set_input_shape('mask', (2, 1, x.size(2)))
+                self.context.set_input_shape('mu', (2, 80, x.size(2)))
+                self.context.set_input_shape('t', (2,))
+                self.context.set_input_shape('spks', (2, 80))
+                self.context.set_input_shape('cond', (2, 80, x.size(2)))
+                output = torch.zeros_like(x)
+                data_ptrs = [x.contiguous().data_ptr(),
+                             mask.contiguous().data_ptr(),
+                             mu.contiguous().data_ptr(),
+                             t.contiguous().data_ptr(),
+                             spks.contiguous().data_ptr(),
+                             cond.contiguous().data_ptr(),
+                             output.contiguous().data_ptr()]
+                for i, j in enumerate(data_ptrs):
+                    self.context.set_tensor_address(self.estimator.get_tensor_name(i), j)
+                # run trt engine
+                assert self.context.execute_async_v3(self.stream.cuda_stream) is True
+                self.stream.synchronize()
+                return output
+
+        else:  #  TrtContextWrapper
             [estimator, stream], trt_engine = self.estimator.acquire_estimator()
             with stream:
                 estimator.set_input_shape('x', (2, 80, x.size(2)))
