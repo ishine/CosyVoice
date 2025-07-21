@@ -186,6 +186,9 @@ def main():
         if scheduler_d is not None:
             scheduler_d.set_step(resume_info["step"])
 
+        if 'data_idx' in resume_info:
+            executor.data_idx = resume_info['data_idx'] + 1
+
     executor.configs = configs
     # Init scaler, used for pytorch amp mixed precision training
     scaler = torch.cuda.amp.GradScaler() if args.use_amp else None
@@ -194,8 +197,14 @@ def main():
     for epoch in range(start_epoch, info_dict['max_epoch']):
         executor.epoch = epoch
 
-        for data_indexes in configs['train_data_indexes']:
+        for data_i, data_indexes in enumerate(configs['train_data_indexes']):
+            if executor.data_idx >= len(configs['train_data_indexes']) - 1:
+                executor.data_idx = 0
+            if data_i != executor.data_idx:
+                logging.warning(f"Jumped train data {data_indexes}")
+                continue
             # Get dataset & dataloader
+            logging.info(f"Loading train data index {data_indexes}")
             train_dataset, cv_dataset, train_data_loader, cv_data_loader = \
                 init_kaldi_dataset(args, configs, gan, data_indexes)
 
@@ -208,6 +217,13 @@ def main():
             else:
                 executor.train_one_epoc(model, optimizer, scheduler, train_data_loader, cv_data_loader,
                                         writer, info_dict, scaler, group_join, codec_model, spkemb_model)
+
+            executor.data_idx = data_i + 1
+            if data_i >= len(configs['train_data_indexes']) - 1:
+                executor.data_idx = 0
+
+            del train_dataset
+            del train_data_loader
 
         dist.destroy_process_group(group_join)
 

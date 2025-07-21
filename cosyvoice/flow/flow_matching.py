@@ -18,6 +18,25 @@ from cosyvoice.flow.components.flow_matching import BASECFM
 from cosyvoice.utils.common import set_all_random_seed
 import onnxruntime
 import tensorrt
+import queue
+
+
+class TrtContextWrapper:
+    def __init__(self, trt_engine, trt_concurrent=1, device='cuda:0'):
+        self.trt_context_pool = queue.Queue(maxsize=trt_concurrent)
+        self.trt_engine = trt_engine
+        for _ in range(trt_concurrent):
+            trt_context = trt_engine.create_execution_context()
+            trt_stream = torch.cuda.stream(torch.cuda.Stream(device))
+            assert trt_context is not None, 'failed to create trt context, maybe not enough CUDA memory, try reduce current trt concurrent {}'.format(trt_concurrent)
+            self.trt_context_pool.put([trt_context, trt_stream])
+        assert self.trt_context_pool.empty() is False, 'no avaialbe estimator context'
+
+    def acquire_estimator(self):
+        return self.trt_context_pool.get(), self.trt_engine
+
+    def release_estimator(self, context, stream):
+        self.trt_context_pool.put([context, stream])
 
 
 class ConditionalCFM(BASECFM):
@@ -92,8 +111,11 @@ class ConditionalCFM(BASECFM):
         # Or in future might add like a return_all_steps flag
         sol = []
 
+        trt_context, trt_stream, trt_engine = None, None, None
         if isinstance(self.estimator, tensorrt.ICudaEngine):
             trt_stream = torch.cuda.stream(self.stream)
+        elif isinstance(self.estimator, TrtContextWrapper):
+            [trt_context, trt_stream], trt_engine = self.estimator.acquire_estimator()
         else:
             from contextlib import nullcontext
             trt_stream = nullcontext
@@ -115,11 +137,8 @@ class ConditionalCFM(BASECFM):
                 cond_in[0] = cond
 
                 dphi_dt = self.forward_estimator(
-                    x_in, mask_in,
-                    mu_in, t_in,
-                    spks_in,
-                    cond_in,
-                    streaming
+                    x_in, mask_in,  mu_in, t_in, spks_in, cond_in, streaming,
+                    trt_context=trt_context, trt_stream=trt_stream, trt_engine=trt_engine
                 )
                 dphi_dt, cfg_dphi_dt = torch.split(dphi_dt, [x.size(0), x.size(0)], dim=0)
                 dphi_dt = ((1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt)
@@ -129,9 +148,12 @@ class ConditionalCFM(BASECFM):
                 if step < len(t_span) - 1:
                     dt = t_span[step + 1] - t
 
+        if isinstance(self.estimator, TrtContextWrapper):
+            self.estimator.release_estimator(trt_context, trt_stream)
+
         return sol[-1].float()
 
-    def forward_estimator(self, x, mask, mu, t, spks, cond, streaming=False):
+    def forward_estimator(self, x, mask, mu, t, spks, cond, streaming=False, **kwargs):
         if isinstance(self.estimator, torch.nn.Module):
             return self.estimator(x, mask, mu, t, spks, cond, streaming=streaming)
         elif isinstance(self.estimator, onnxruntime.InferenceSession):
@@ -169,15 +191,18 @@ class ConditionalCFM(BASECFM):
                 self.stream.synchronize()
                 return output
 
-        else:  #  TrtContextWrapper
-            [estimator, stream], trt_engine = self.estimator.acquire_estimator()
-            with stream:
-                estimator.set_input_shape('x', (2, 80, x.size(2)))
-                estimator.set_input_shape('mask', (2, 1, x.size(2)))
-                estimator.set_input_shape('mu', (2, 80, x.size(2)))
-                estimator.set_input_shape('t', (2,))
-                estimator.set_input_shape('spks', (2, 80))
-                estimator.set_input_shape('cond', (2, 80, x.size(2)))
+        elif isinstance(self.estimator, TrtContextWrapper):
+            # 从上层多步采样的地方获取context, stream传进来，上层也需要用特定的stream
+            trt_context = kwargs.get('trt_context')
+            trt_stream = kwargs.get('trt_stream')
+            trt_engine = kwargs.get('trt_engine')
+            with trt_stream:
+                trt_context.set_input_shape('x', (2, 80, x.size(2)))
+                trt_context.set_input_shape('mask', (2, 1, x.size(2)))
+                trt_context.set_input_shape('mu', (2, 80, x.size(2)))
+                trt_context.set_input_shape('t', (2,))
+                trt_context.set_input_shape('spks', (2, 80))
+                trt_context.set_input_shape('cond', (2, 80, x.size(2)))
                 output = torch.zeros_like(x)
                 data_ptrs = [x.contiguous().data_ptr(),
                              mask.contiguous().data_ptr(),
@@ -187,13 +212,13 @@ class ConditionalCFM(BASECFM):
                              cond.contiguous().data_ptr(),
                              output.contiguous().data_ptr()]
                 for i, j in enumerate(data_ptrs):
-                    estimator.set_tensor_address(trt_engine.get_tensor_name(i), j)
+                    trt_context.set_tensor_address(
+                        trt_engine.get_tensor_name(i), j)
                 # run trt engine
-                assert estimator.execute_async_v3(
+                assert trt_context.execute_async_v3(
                     torch.cuda.current_stream().cuda_stream) is True
                 torch.cuda.current_stream().synchronize()
-            self.estimator.release_estimator(estimator, stream)
-            return output
+                return output
 
     def compute_loss(self, x1, mask, mu, spks=None, cond=None, streaming=False):
         """Computes diffusion loss

@@ -406,20 +406,30 @@ def init_json_dataset(args, configs, gan, train_data_indexes):
                                 prefetch_factor=None)
     return train_dataset, cv_dataset, train_data_loader, cv_data_loader
 
+def safe_torch_load(path):
+    import pickle
+    try:
+        obj = torch.load(path, map_location='cpu')
+        return obj
+    except (EOFError, RuntimeError, FileNotFoundError,
+            pickle.UnpicklingError, UnicodeDecodeError) as e:
+        print(f"[ERROR] Failed to load model from {path}: {type(e).__name__} - {e}")
+        return None
+
 def get_latest_ckpt(ckpt_dir, regex="epoch_*.pt"):
     import glob
     f_list = glob.glob(os.path.join(ckpt_dir, regex))
     f_list.sort(key=lambda f: int("".join(filter(str.isdigit, f))))
-    if len(f_list) != 0:
+    while len(f_list) != 0:
         x = f_list[-1]
-        epoch = x.split("epoch_")[1].split("_")[0]
-        y = f"{ckpt_dir}/epoch_{epoch}_whole.pt"
-        if os.path.exists(y):
-            x = y
-        return x
-    else:
-        return "failed to find latest_checkpoint_path:" \
-               + os.path.join(ckpt_dir, regex)
+        if os.path.exists(x) and safe_torch_load(x) is not None:
+            return x
+        else:
+            file_list = file_list[:-1]
+            continue
+
+    return "failed to find latest_checkpoint_path:" \
+            + os.path.join(ckpt_dir, regex)
 
 def get_resume_params(yaml_path):
     with open(yaml_path, 'r', encoding='utf-8') as file:

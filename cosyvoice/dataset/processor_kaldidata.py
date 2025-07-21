@@ -357,6 +357,9 @@ def mix_text_pinyin(data, eng_frontend, detect_language,
                         ";", "；", "、", "·", "…", "—", "-", "|", "~", "'",
                         "/", "\"", "“", "”", "(", "（", ")", "）"]):
                         continue
+                    elif words[id].startswith('<'):  # 人工标记数据<ptsgk>, 跳过前端
+                        continue
+
                     try:
                         phoneme_result = eng_frontend.eng_to_phoneme(words[id])
                         words[id] = f"<{' '.join(phoneme_result[0][0])}>"
