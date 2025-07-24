@@ -2380,8 +2380,7 @@ class Qwen2LM_Phoneme_Sglang(torch.nn.Module):
         self.llm_output_size = llm_output_size
         self.speech_token_size = speech_token_size
         # 1. build phoneme token inputs related modules
-        assert (
-                           text_token_dim + text_tone_dim + text_lang_dim + text_prsd_dim) == text_encoder_input_size
+        assert (text_token_dim + text_tone_dim + text_lang_dim + text_prsd_dim) == text_encoder_input_size
         self.text_embedding = nn.ModuleList([
             torch.nn.Embedding(text_token_size, text_token_dim),
             torch.nn.Embedding(text_tone_size, text_tone_dim),
@@ -2433,9 +2432,6 @@ class Qwen2LM_Phoneme_Sglang(torch.nn.Module):
         # 4. sampling method
         self.sampling = sampling
 
-        # sglang 推理时，去掉模型中qwen部分的显存, 将qwen_token_embed剥离出来
-        self.qwen_token_embed = self.llm.model.model.embed_tokens
-
         # 5. use_sglang
         self.use_sglang = (qwen_sglang_config is not None)
         if self.use_sglang:
@@ -2474,8 +2470,7 @@ class Qwen2LM_Phoneme_Sglang(torch.nn.Module):
             signal.signal(signal.SIGTERM, self.signal_handler)
             atexit.register(self.cleanup)
 
-            del self.llm.model.model.layers
-            self.llm = None
+            del self.llm.model.model.layers  # 去掉torch原始参数节省显存
 
     def cleanup(self):
         from sglang.srt.utils import kill_process_tree
@@ -2582,7 +2577,7 @@ class Qwen2LM_Phoneme_Sglang(torch.nn.Module):
 
         # 1. encode text
         pho, pho_len = self.encode(pho, pho_len)
-        text = self.qwen_token_embed(text)
+        text = self.llm.model.model.embed_tokens(text)
 
         text_mask = ~make_pad_mask(text_len, text.size(1)).unsqueeze(
             1)  # (B, 1, T1)
