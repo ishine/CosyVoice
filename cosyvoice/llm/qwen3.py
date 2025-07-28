@@ -16,27 +16,27 @@
 # Modify details for the adaptation of Qwen2 model.
 """Inference-only Qwen2 model compatible with HuggingFace weights."""
 
+from typing import Any, Dict, Iterable, Optional, Tuple, List
 import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+from einops import rearrange
 import torch
-import flashinfer
 from torch import nn
-from typing import Any, Dict, Iterable, Optional, Tuple, List
-from transformers.models.qwen2 import Qwen2PreTrainedModel
-from transformers.models.qwen2.modeling_qwen2 import Qwen2Attention, Qwen2RMSNorm,Qwen2RotaryEmbedding, \
-    FlashAttentionKwargs, apply_rotary_pos_emb, Callable, eager_attention_forward, ALL_ATTENTION_FUNCTIONS, Qwen2MLP
+import torch.nn.functional as F
+import time
+from transformers.models.qwen3 import Qwen3PreTrainedModel
+from transformers.models.qwen3.modeling_qwen3 import Qwen3Attention, Qwen3RotaryEmbedding,Qwen3RMSNorm,FlashAttentionKwargs, Qwen3DecoderLayer,apply_rotary_pos_emb, Callable, eager_attention_forward, ALL_ATTENTION_FUNCTIONS, Qwen3MLP,repeat_kv
 from transformers.generation import GenerationMixin
-from transformers.modeling_outputs import CausalLMOutputWithPast, BaseModelOutputWithPast
+from transformers.modeling_outputs import CausalLMOutputWithPast,BaseModelOutputWithPast
 from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
 from transformers.cache_utils import DynamicCache,StaticCache,SlidingWindowCache
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.cache_utils import Cache
 from transformers.processing_utils import Unpack
-from torch.nn.attention import SDPBackend, sdpa_kernel
+import flashinfer
 
-
-class Qwen2Attention(nn.Module):
+class Qwen3Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(self, config: Qwen2Config, layer_idx: int):
@@ -48,10 +48,12 @@ class Qwen2Attention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
         self.is_causal = True
-        self.q_proj = nn.Linear(config.hidden_size, config.num_attention_heads * self.head_dim, bias=True)
-        self.k_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=True)
-        self.v_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=True)
-        self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=False)
+        self.q_proj = nn.Linear(config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias)
+        self.k_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias)
+        self.v_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias)
+        self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias)
+        self.q_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # unlike olmo, only on the head dim!
+        self.k_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # thus post q_norm does not need reshape
 
         #CUDA GRAPHS
         self.in_graph = torch.cuda.CUDAGraph()
@@ -64,13 +66,13 @@ class Qwen2Attention(nn.Module):
         self.static_emb2_in = torch.randn(1,1,self.head_dim,dtype = torch.bfloat16,device='cuda')
         
         self.out_graph = torch.cuda.CUDAGraph()
-        self.static_out_in = torch.randn(1,1,config.hidden_size,dtype = torch.bfloat16,device='cuda')
+        self.static_out_in = torch.randn(1,1,config.num_attention_heads * self.head_dim,dtype = torch.bfloat16,device='cuda')
         self.static_out_out = torch.randn(1,1,config.hidden_size,dtype = torch.bfloat16,device='cuda')
 
     def warmup(self,):
         with torch.cuda.graph(self.in_graph):
-            query_states = self.q_proj(self.static_in_in).view(1,1,self.config.num_attention_heads,self.head_dim).transpose(1,2)
-            key_states = self.k_proj(self.static_in_in).view(1,1,self.config.num_key_value_heads,self.head_dim).transpose(1,2)
+            query_states = self.q_norm(self.q_proj(self.static_in_in).view(1,1,self.config.num_attention_heads,self.head_dim)).transpose(1,2)
+            key_states = self.k_norm(self.k_proj(self.static_in_in).view(1,1,self.config.num_key_value_heads,self.head_dim)).transpose(1,2)
             value_states = self.v_proj(self.static_in_in).view(1,1,self.config.num_key_value_heads,self.head_dim).transpose(1,2)
             cos, sin = self.static_emb1_in, self.static_emb2_in
             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -111,7 +113,7 @@ class Qwen2Attention(nn.Module):
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-        
+
         sliding_window = None
 
         # with sdpa_kernel([SDPBackend.FLASH_ATTENTION]): #不输入mask会自动选择flash attn
@@ -126,15 +128,8 @@ class Qwen2Attention(nn.Module):
         #     sliding_window=sliding_window,  # main diff with Llama
         #     **kwargs,
         # )
-        attn_output = flashinfer.decode.single_decode_with_kv_cache(
-            query_states.squeeze(),
-            key_states.squeeze(),
-            value_states.squeeze(),
-            kv_layout = 'HND',
-            use_tensor_cores=True
-        )
+        attn_output = flashinfer.decode.single_decode_with_kv_cache(query_states.squeeze(),key_states.squeeze(),value_states.squeeze(),kv_layout = 'HND',use_tensor_cores=True)
         attn_output= attn_output[None,None,:,:]
-        
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
 
         self.static_out_in.copy_(attn_output)
@@ -151,12 +146,12 @@ class Qwen2Attention(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        input_shape = hidden_states.shape[:-1]
-        hidden_shape = (*input_shape, -1, self.head_dim)
+        input_shape = hidden_states.shape[:-1] #[b,t]
+        hidden_shape = (*input_shape, -1, self.head_dim) #[b,t,num_head,dim_head]
 
-        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)#[1,14,1,64]
-        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)#[1,2,1,64]
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)#[1,2,1,64]
+        query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2) # [b,num_head,t,dim_head]
+        key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2) # [b,num_head_kv,t,dim_head]
+        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2) # [b,num_head_kv,t,dim_head]
 
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -167,6 +162,8 @@ class Qwen2Attention(nn.Module):
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         sliding_window = None
+
+
         attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
         attn_output, attn_weights = attention_interface(
@@ -189,10 +186,10 @@ class Qwen2DecoderLayer(nn.Module):
     def __init__(self, config: Qwen2Config, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = Qwen2Attention(config=config, layer_idx=layer_idx)
-        self.mlp = Qwen2MLP(config)
-        self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.self_attn = Qwen3Attention(config=config, layer_idx=layer_idx)
+        self.mlp = Qwen3MLP(config)
+        self.input_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         if config.sliding_window and config._attn_implementation != "flash_attention_2":
             logger.warning_once(
                 f"Sliding Window Attention is enabled but not implemented for `{config._attn_implementation}`; "
@@ -200,6 +197,7 @@ class Qwen2DecoderLayer(nn.Module):
             )
         
         ################CUDA GRAPHS#########################
+        
         self.graph_mlp = torch.cuda.CUDAGraph()
         self.graph_ln_in = torch.cuda.CUDAGraph()
         self.static_mlp_in = torch.randn(1,1,self.hidden_size,dtype = torch.bfloat16,device='cuda')
@@ -305,7 +303,7 @@ class Qwen2DecoderLayer(nn.Module):
 
         return outputs
     
-class Qwen2Model(Qwen2PreTrainedModel):
+class Qwen3Model(Qwen3PreTrainedModel):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`Qwen2DecoderLayer`]
 
@@ -323,23 +321,23 @@ class Qwen2Model(Qwen2PreTrainedModel):
         self.layers = nn.ModuleList(
             [Qwen2DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
-        self.norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.rotary_emb = Qwen2RotaryEmbedding(config=config)
+        self.norm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.rotary_emb = Qwen3RotaryEmbedding(config=config)
         self.gradient_checkpointing = False
         self.max_cache_len = max_cache_len
         # Initialize weights and apply final processing
         self.post_init()
-    
-    def warmup(self,):
-        for layer in self.layers:
-            layer.warmup()
-            
+
     def get_input_embeddings(self):
         return self.embed_tokens
 
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
+    def warmup(self,):
+        for layer in self.layers:
+            layer.warmup()
+            
     def forward(
         self,
         graph=False,
@@ -352,13 +350,12 @@ class Qwen2Model(Qwen2PreTrainedModel):
         cache_position: Optional[torch.LongTensor] = None,
         **flash_attn_kwargs: Any,
     ) :
-        #########################preforward#######################################
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
+
         if use_cache and past_key_values is None:
-            # past_key_values = StaticCache(self.config,max_cache_len=self.max_cache_len,
-            # max_batch_size=1,device=inputs_embeds.device,dtype=inputs_embeds.dtype)
+            # past_key_values = StaticCache(self.config,max_cache_len=self.max_cache_len,max_batch_size=1,device=inputs_embeds.device,dtype=inputs_embeds.dtype)
             past_key_values = DynamicCache()
 
         if cache_position is None:
@@ -378,7 +375,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
 
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
-        #####################################################decoder layers################################################
+
         # decoder layers
         all_hidden_states = None
         all_self_attns = () if output_attentions else None
@@ -565,19 +562,20 @@ class Qwen2Model(Qwen2PreTrainedModel):
         return causal_mask
 
 
-class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
+class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
+    _tp_plan = {"lm_head": "colwise_rep"}
+    _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
 
     def __init__(self, config,max_cache_len):
         super().__init__(config)
-        self.model = Qwen2Model(config,max_cache_len)
+        self.model = Qwen3Model(config,max_cache_len)
         
         # Initialize weights and apply final processing
         self.post_init()
-
     def warmup(self):
         self.model.warmup()
-        
+
     def forward(
         self,
         graph=False,

@@ -1,12 +1,9 @@
-import os
+from packaging import version
 import json
 import torch
 import transformers
-import torch.nn.functional as F
+from tqdm import tqdm
 from copy import deepcopy
-from torch import nn
-from packaging import version
-from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
 from typing import Callable, List, Generator, Tuple
 from torch.nn.utils.rnn import pad_sequence, unpad_sequence
 from cosyvoice.llm.qwen2_5 import Qwen2ForCausalLM
@@ -15,23 +12,23 @@ from cosyvoice.utils.mask import make_pad_mask
 from cosyvoice.transformer.decoder_layer import DecoderLayer
 from cosyvoice.transformer.attention import MultiHeadedAttention
 from cosyvoice.transformer.positionwise_feed_forward import PositionwiseFeedForward
+from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
+if version.Version(transformers.__version__) >= version.Version("4.51.0"):
+    from cosyvoice.llm.qwen3 import Qwen3ForCausalLM
+
 import logging
 logger = logging.getLogger(__name__)
-
+logger.setLevel(logging.INFO)
 
 class Qwen2Encoder(torch.nn.Module):
-    def __init__(self, pretrain_path, max_cache_len):
+    def __init__(self, pretrain_path,max_cache_len):
         super().__init__()
-        self.qwenversion = "2.5" if "3" not in pretrain_path else "3"
-        model_class = Qwen2ForCausalLM  # if self.qwenversion == "2.5" else Qwen3ForCausalLM
-
-        if os.path.exists(f"{pretrain_path}/model.safetensors"):
-            self.model = model_class.from_pretrained(pretrain_path,
-                                                     max_cache_len)
-        else:
-            config_dict = json.load(open(f"{pretrain_path}/config.json"))
-            config = Qwen2Config(attn_implementation='sdpa', **config_dict)
-            self.model = model_class(config, max_cache_len, )
+        
+        config_dict = json.load(open(f"{pretrain_path}/config.json"))
+        config = Qwen2Config(attn_implementation='sdpa', **config_dict)
+        self.qwenversion = config.model_type
+        model_class = Qwen2ForCausalLM if self.qwenversion != "qwen3" else Qwen3ForCausalLM
+        self.model = model_class(config,max_cache_len,)
 
     def forward_one_step(self, xs, masks, cache=None):
         outs = self.model(
@@ -46,61 +43,63 @@ class Qwen2Encoder(torch.nn.Module):
         new_cache = outs.past_key_values
         return xs, new_cache
 
-
 class Qwen2EncoderInfer(Qwen2Encoder):
-    def __init__(self, pretrain_path, max_cache_len=5000, dtype=torch.bfloat16):
-        Qwen2Encoder.__init__(self, pretrain_path, max_cache_len)
+    def __init__(self, pretrain_path,max_cache_len=5000,dtype = torch.bfloat16):
+        Qwen2Encoder.__init__(self,pretrain_path,max_cache_len)
         self.dtype = dtype
         self.qwen_token_embed = deepcopy(self.model.model.embed_tokens)  # 这个embed模块还是保持fp32
         self.model.to(self.dtype)
 
     @torch.inference_mode()
     def prefill(self, xs):
-        # xs:(b,t,c), cache:(None)
+        #xs:(b,t,c), cache:(None)
         y, cache = self.model(inputs_embeds=xs, cache=None)
         return y, cache, torch.LongTensor([xs.shape[1]]).cuda()
-
+    
     @torch.inference_mode()
-    @torch.amp.autocast('cuda', dtype=torch.bfloat16)
+    @torch.amp.autocast('cuda',dtype=torch.bfloat16)
     def forward_one_step(self, xs, cache, cache_position):
         if cache == None:
             xs = xs.to(self.dtype)
-            # first step
+            #first step
             return self.prefill(xs)
         else:
             return self.decode(xs, cache, cache_position)
             # y, cache = self.model(inputs_embeds=xs, cache=cache,cache_position=cache_position)
             # return y, cache, cache_position+1
-
+    
     @torch.inference_mode()
     def forward(self, xs, cache, cache_position):
-        return self.model(inputs_embeds=xs, cache=cache,
-                          cache_position=cache_position)
-
+        return self.model(inputs_embeds=xs, cache=cache,cache_position=cache_position)
+    
     @torch.inference_mode()
-    def warmup(self, hidden_size=896):
+    def warmup(self, ):
+        logger.info("Warming up...")
         self.model.warmup()
-
+        
+        xs = torch.rand(1, 100, self.model.model.config.hidden_size).cuda().to(self.dtype)
+        for _ in tqdm(range(3)):
+            a,b,c = self.forward_one_step(xs, None, None)
+            self.forward_one_step(a[:, -1:,], b, c)
+        logger.info("Warmup done.")
+    
     def copy_cache(self, source, target):
-        # 新版transformers>=4.51.0的逻辑
+        #新版transformers>=4.51.0的逻辑
         # for id in range(len(source.key_cache)):
-
-        # 旧版transformers<4.51.0的逻辑
+            
+        #旧版transformers<4.51.0的逻辑
         for id in range(len(source.key_cache)):
             target.key_cache[id].copy_(source.key_cache[id])
             target.value_cache[id].copy_(source.value_cache[id])
-            if version.Version(transformers.__version__) < version.Version(
-                    "4.51.0"):
-                getattr(target, f"key_cache_{id}").copy_(
-                    getattr(source, f"key_cache_{id}"))
-                getattr(target, f"value_cache_{id}").copy_(
-                    getattr(source, f"value_cache_{id}"))
+            if version.Version(transformers.__version__) < version.Version("4.51.0"):
+                getattr(target,f"key_cache_{id}").copy_(getattr(source,f"key_cache_{id}"))
+                getattr(target,f"value_cache_{id}").copy_(getattr(source,f"value_cache_{id}"))
 
-    @torch.inference_mode()
+    @torch.inference_mode()    
     def decode(self, xs, cache, cache_pos):
         y, cache = self.model.forward(graph=True, inputs_embeds=xs, cache=cache)
-        return y, cache, cache_pos + 1
-
+        return y, cache, cache_pos+1
+    
     def to(self):
         self.model.to(self.dtype)
 
@@ -140,9 +139,8 @@ class Qwen2LM_Phoneme_Infer(torch.nn.Module):
         self.llm_output_size = llm_output_size
         self.speech_token_size = speech_token_size
         # 1. build phoneme token inputs related modules
-        assert (
-                           text_token_dim + text_tone_dim + text_lang_dim + text_prsd_dim) == text_encoder_input_size
-        self.text_embedding = nn.ModuleList([
+        assert (text_token_dim + text_tone_dim + text_lang_dim + text_prsd_dim) == text_encoder_input_size
+        self.text_embedding = torch.nn.ModuleList([
             torch.nn.Embedding(text_token_size, text_token_dim),
             torch.nn.Embedding(text_tone_size, text_tone_dim),
             torch.nn.Embedding(text_lang_size, text_lang_dim),
@@ -154,7 +152,7 @@ class Qwen2LM_Phoneme_Infer(torch.nn.Module):
             f"llm use frontend prosody: {use_frontend_prsd}, use pause label: {use_pause_label}")
 
         self.text_encoder = text_encoder
-        self.text_encoder_affine_layer = nn.Linear(
+        self.text_encoder_affine_layer = torch.nn.Linear(
             self.text_encoder.output_size(), llm_input_size
         )
         #  Hard code Decoder layer as arc-attention
@@ -176,7 +174,7 @@ class Qwen2LM_Phoneme_Infer(torch.nn.Module):
 
         self.llm_embedding = torch.nn.Embedding(2, llm_input_size)
         self.llm = llm
-        self.llm_decoder = nn.Linear(llm_output_size, speech_token_size + 3)
+        self.llm_decoder = torch.nn.Linear(llm_output_size, speech_token_size + 3)
 
 
         # 3. [Optional] build speech token related modules
@@ -188,8 +186,6 @@ class Qwen2LM_Phoneme_Infer(torch.nn.Module):
         # 4. sampling method
         self.sampling = sampling
 
-        # sglang 推理时，去掉模型中qwen部分的显存, 将qwen_token_embed剥离出来
-        self.qwen_token_embed = self.llm.qwen_token_embed
 
     def encode(
             self,
@@ -239,6 +235,7 @@ class Qwen2LM_Phoneme_Infer(torch.nn.Module):
         return top_ids
 
     @torch.inference_mode()
+    @torch.amp.autocast('cuda',dtype=torch.bfloat16)
     def inference(
             self,
             text: Tuple,
@@ -252,82 +249,83 @@ class Qwen2LM_Phoneme_Infer(torch.nn.Module):
             max_token_text_ratio: float = 20,
             min_token_text_ratio: float = 2,
     ) -> Generator[torch.Tensor, None, None]:
-        device = embedding.device
+        with torch.no_grad():
+            device = embedding.device
 
-        text, pho = text
-        text_len, pho_len = text_len
-        prompt_text, prompt_pho = prompt_text
-        prompt_text_len, prompt_pho_len = prompt_text_len
+            text, pho = text
+            text_len, pho_len = text_len
+            prompt_text, prompt_pho = prompt_text
+            prompt_text_len, prompt_pho_len = prompt_text_len
 
-        text = torch.concat([prompt_text, text], dim=1)
-        text_len += prompt_text_len
-        pho = torch.concat([prompt_pho, pho], dim=1)
-        pho_len += prompt_pho_len
+            text = torch.concat([prompt_text, text], dim=1)
+            text_len += prompt_text_len
+            pho = torch.concat([prompt_pho, pho], dim=1)
+            pho_len += prompt_pho_len
 
-        pho_embed_list = []
-        for i in range(len(self.text_embedding)):
-            embed = self.text_embedding[i](pho[:, :, i])
-            if not self.use_frontend_prsd and i == 3:
-                embed *= 0.0
-            pho_embed_list.append(embed)
-        pho = torch.cat(pho_embed_list, dim=-1)
+            pho_embed_list = []
+            for i in range(len(self.text_embedding)):
+                embed = self.text_embedding[i](pho[:, :, i])
+                if not self.use_frontend_prsd and i == 3:
+                    embed *= 0.0
+                pho_embed_list.append(embed)
+            pho = torch.cat(pho_embed_list, dim=-1)
 
-        # 1. encode text
-        pho, pho_len = self.encode(pho, pho_len)
-        text = self.qwen_token_embed(text)
+            # 1. encode text
+            pho, pho_len = self.encode(pho, pho_len)
+            text = self.llm.qwen_token_embed(text)  # fp32
 
-        text_mask = ~make_pad_mask(text_len, text.size(1)).unsqueeze(
-            1)  # (B, 1, T1)
-        pho_mask = ~make_pad_mask(pho_len, pho.size(1)).unsqueeze(
-            1)  # (B, 1, T2)
-        for src_attention in self.src_attention:
-            pho, pho_mask, text, text_mask = src_attention(pho, pho_mask, text,
-                                                           text_mask)
+            text_mask = ~make_pad_mask(text_len, text.size(1)).unsqueeze(
+                1)  # (B, 1, T1)
+            pho_mask = ~make_pad_mask(pho_len, pho.size(1)).unsqueeze(
+                1)  # (B, 1, T2)
+            for src_attention in self.src_attention:
+                pho, pho_mask, text, text_mask = src_attention(pho, pho_mask, text,
+                                                               text_mask)
 
-        # 2. encode embedding
-        if embedding.shape[0] != 0:
-            embedding = F.normalize(embedding, dim=1)
-            embedding = self.spk_embed_affine_layer(embedding)
-            embedding = embedding.unsqueeze(dim=1)
-        else:
-            embedding = torch.zeros(1, 0, self.llm_input_size,
-                                    dtype=text.dtype).to(device)
+            # 2. encode embedding
+            if embedding.shape[0] != 0:
+                embedding = torch.nn.functional.normalize(embedding, dim=1)
+                embedding = self.spk_embed_affine_layer(embedding)
+                embedding = embedding.unsqueeze(dim=1)
+            else:
+                embedding = torch.zeros(1, 0, self.llm_input_size,
+                                        dtype=text.dtype).to(device)
 
-        # 3. concat llm_input
-        sos_eos_emb = self.llm_embedding.weight[self.sos_eos].reshape(1, 1, -1)
-        task_id_emb = self.llm_embedding.weight[self.task_id].reshape(1, 1, -1)
-        if prompt_speech_token_len != 0:
-            prompt_speech_token_emb = self.speech_embedding(prompt_speech_token)
-        else:
-            prompt_speech_token_emb = torch.zeros(1, 0, self.llm_input_size,
-                                                  dtype=text.dtype).to(device)
-        lm_input = torch.concat(
-            [sos_eos_emb, embedding, pho, task_id_emb, prompt_speech_token_emb],
-            dim=1)
+            # 3. concat llm_input
+            sos_eos_emb = self.llm_embedding.weight[self.sos_eos].reshape(1, 1, -1)
+            task_id_emb = self.llm_embedding.weight[self.task_id].reshape(1, 1, -1)
+            if prompt_speech_token_len != 0:
+                prompt_speech_token_emb = self.speech_embedding(prompt_speech_token)
+            else:
+                prompt_speech_token_emb = torch.zeros(1, 0, self.llm_input_size,
+                                                      dtype=text.dtype).to(device)
+            lm_input = torch.concat(
+                [sos_eos_emb, embedding, pho, task_id_emb, prompt_speech_token_emb],
+                dim=1)
 
-        # 4. cal min/max_length
-        min_len = int((text_len - prompt_text_len) * min_token_text_ratio)
-        max_len = int((text_len - prompt_text_len) * max_token_text_ratio)
+            # 4. cal min/max_length
+            min_len = int((text_len - prompt_text_len) * min_token_text_ratio)
+            max_len = int((text_len - prompt_text_len) * max_token_text_ratio)
 
-        # 5. step by step decode
-        out_tokens = []
-        cache, cache_pos = None, None
-        for i in range(max_len):
-            y_pred, cache, cache_pos = self.llm.forward_one_step(
-                lm_input, cache=cache, cache_position=cache_pos)
-            # logp = self.llm_decoder(y_pred[:, -1].to(torch.float32)).log_softmax(dim=-1)
-            # top_ids = self.sampling_ids(logp.squeeze(dim=0), out_tokens,
-            #                             sampling,
-            #                             ignore_eos=True if i < min_len else False).item()
-            logits = self.llm_decoder(y_pred[:, -1].to(torch.float32))
-            top_ids = self.sampling(logits, out_tokens)
+            # 5. step by step decode
+            out_tokens = []
+            cache, cache_pos = None, None
+            for i in range(max_len):
+                y_pred, cache, cache_pos = self.llm.forward_one_step(
+                    lm_input, cache=cache, cache_position=cache_pos)
+                # logp = self.llm_decoder(y_pred[:, -1].to(torch.float32)).log_softmax(dim=-1)
+                # top_ids = self.sampling_ids(logp.squeeze(dim=0), out_tokens,
+                #                             sampling,
+                #                             ignore_eos=True if i < min_len else False).item()
+                logits = self.llm_decoder(y_pred[:, -1].clone().to(torch.float32))
+                top_ids = self.sampling(logits, out_tokens)
 
-            if top_ids == self.speech_token_size:
-                break
-            if top_ids > self.speech_token_size:
-                logger.warning(f"================big token！！！{top_ids}")
-                continue
-            # in stream mode, yield token one by one
-            yield top_ids
-            out_tokens.append(top_ids)
-            lm_input = self.speech_embedding.weight[top_ids].reshape(1, 1, -1)
+                if top_ids == self.speech_token_size:
+                    break
+                if top_ids > self.speech_token_size:
+                    logger.warning(f"================big token！！！{top_ids}")
+                    continue
+                # in stream mode, yield token one by one
+                yield top_ids
+                out_tokens.append(top_ids)
+                lm_input = self.speech_embedding.weight[top_ids].reshape(1, 1, -1)
