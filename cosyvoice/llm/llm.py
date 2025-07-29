@@ -16,7 +16,7 @@ import os.path
 import queue
 import time
 import threading
-from typing import Dict, Optional, Callable, List, Generator, Tuple
+from typing import Dict, Optional, Callable, List, Generator, Tuple, Union
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -787,8 +787,16 @@ class Qwen2LM(TransformerLM):
             length_normalized_loss: bool = True,
             lsm_weight: float = 0.0,
             mix_ratio: List[int] = [5, 15],
+            use_embedding: bool = False,
+            spk_embed_dim: int = 512,
+            qwen_sglang_config: dict = None,  # sglang/vllm加速配置
+            vllm_sample_params: dict = None,  # vllm采样参数配置
     ):
         torch.nn.Module.__init__(self)
+        self.use_frontend_prsd = False
+        self.use_pause_label = False
+        self.use_embedding = use_embedding
+
         self.llm_input_size = llm_input_size
         self.llm_output_size = llm_output_size
         self.speech_token_size = speech_token_size
@@ -809,6 +817,8 @@ class Qwen2LM(TransformerLM):
 
         # 3. [Optional] build speech token related modules
         self.speech_embedding = torch.nn.Embedding(speech_token_size + 3, llm_input_size)
+        if self.use_embedding:
+            self.spk_embed_affine_layer = torch.nn.Linear(spk_embed_dim, llm_input_size)
 
         # 4. sampling method
         self.sampling = sampling
@@ -817,8 +827,33 @@ class Qwen2LM(TransformerLM):
         # 5. vllm related
         self.stop_token_ids = [speech_token_size + i for i in range(3)]
         self.vllm_output_queue = {}
+        self.lock = threading.Lock()
+        self.use_vllm = (qwen_sglang_config is not None)
+        self.vllm_sample_params = vllm_sample_params
+        logger.info(f"vllm sampling params: {vllm_sample_params}")
+        if self.use_vllm:
+            os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"  # 默认后端为Flash-Attn, 改为FlashInfer
+            python_bin_dir = os.path.dirname(sys.executable)
+            custom_env = os.environ.copy()
+            custom_env["PATH"] = f"{python_bin_dir}:{custom_env['PATH']}"
+            model_path = qwen_sglang_config['model_path']
+            self.base_url = qwen_sglang_config['base_url']  # 直接在同一个进程中启动，此参数不需要了
+            mem_fraction = qwen_sglang_config['mem_ratio']
 
-    def prepare_lm_input_target(self, text_token, text_token_emb, text_token_len, speech_token, speech_token_emb, speech_token_len):
+            from vllm import ModelRegistry
+            from cosyvoice.vllm.cosyvoice2 import CosyVoice2ForCausalLM
+            ModelRegistry.register_model("CosyVoice2ForCausalLM", CosyVoice2ForCausalLM)
+            from vllm import EngineArgs, LLMEngine
+            engine_args = EngineArgs(model=model_path,
+                                     skip_tokenizer_init=True,
+                                     enable_prompt_embeds=True,
+                                     disable_custom_all_reduce=True,
+                                     gpu_memory_utilization=float(mem_fraction))
+            self.vllm = LLMEngine.from_engine_args(engine_args)
+            del self.llm.model.model.layers
+
+    def prepare_lm_input_target(self, text_token, text_token_emb, text_token_len, speech_token,
+                                speech_token_emb, speech_token_len, embedding=None):
         lm_target, lm_input = [], []
         text_token = unpad_sequence(text_token, text_token_len.cpu(), batch_first=True)
         speech_token = unpad_sequence(speech_token, speech_token_len.cpu(), batch_first=True)
@@ -836,12 +871,18 @@ class Qwen2LM(TransformerLM):
                     if len(this_text_token) == self.mix_ratio[0]:
                         assert len(this_speech_token) == self.mix_ratio[1]
                         this_lm_target += [IGNORE_ID] * (self.mix_ratio[0] - 1)
+                        if embedding is not None:
+                            this_lm_target += [IGNORE_ID]
+                            this_lm_input.append(embedding[i])
                         this_lm_target += this_speech_token
                         this_lm_target.append(self.speech_token_size + 2)
                         this_lm_input.append(text_token_emb[i][j * self.mix_ratio[0]: (j + 1) * self.mix_ratio[0]])
                         this_lm_input.append(speech_token_emb[i][j * self.mix_ratio[1]: (j + 1) * self.mix_ratio[1]])
                     else:
-                        this_lm_target += [-1] * len(this_text_token)
+                        this_lm_target += [IGNORE_ID] * len(this_text_token)
+                        if embedding is not None:
+                            this_lm_target += [IGNORE_ID]
+                            this_lm_input.append(embedding[i])
                         this_lm_target += speech_token[i][j * self.mix_ratio[1]:].tolist()
                         this_lm_target.append(self.speech_token_size)
                         this_lm_input.append(text_token_emb[i][j * self.mix_ratio[0]:])
@@ -850,9 +891,24 @@ class Qwen2LM(TransformerLM):
                 this_lm_target, this_lm_input = torch.tensor(this_lm_target), torch.concat(this_lm_input, dim=0)
             # unistream sequence
             else:
-                this_lm_target = torch.tensor([IGNORE_ID] * (1 + text_token_len[i]) + speech_token[i].tolist() + [self.speech_token_size])
-                this_lm_input = torch.concat([self.llm_embedding.weight[self.sos_eos].reshape(1, -1), text_token_emb[i],
-                                              self.llm_embedding.weight[self.task_id].reshape(1, -1), speech_token_emb[i]], dim=0)
+                if embedding is None:
+                    this_lm_target = torch.tensor(
+                        [IGNORE_ID] * (1 + text_token_len[i]) + speech_token[
+                            i].tolist() + [self.speech_token_size])
+                    this_lm_input = torch.concat(
+                        [self.llm_embedding.weight[self.sos_eos].reshape(1, -1),
+                         text_token_emb[i],
+                         self.llm_embedding.weight[self.task_id].reshape(1, -1),
+                         speech_token_emb[i]], dim=0)
+                else:
+                    this_lm_target = torch.tensor(
+                        [IGNORE_ID] * (2 + text_token_len[i]) + speech_token[
+                            i].tolist() + [self.speech_token_size])
+                    this_lm_input = torch.concat(
+                        [self.llm_embedding.weight[self.sos_eos].reshape(1, -1),
+                         embedding[i], text_token_emb[i],
+                         self.llm_embedding.weight[self.task_id].reshape(1, -1),
+                         speech_token_emb[i]], dim=0)
             lm_target.append(this_lm_target)
             lm_input.append(this_lm_input)
         lm_input_len = torch.tensor([i.size(0) for i in lm_input], dtype=torch.int32)
@@ -876,6 +932,13 @@ class Qwen2LM(TransformerLM):
         text_token_len = batch['text_token_len'].to(device)
         speech_token = batch['speech_token'].to(device)
         speech_token_len = batch['speech_token_len'].to(device)
+        if self.use_embedding:
+            embedding = batch['embedding'].to(device)
+            embedding = F.normalize(embedding, dim=1)
+            embedding = self.spk_embed_affine_layer(embedding)
+            embedding = embedding.unsqueeze(1)
+        else:
+            embedding = None
 
         # 1. encode text_token
         text_token_emb = self.llm.model.model.embed_tokens(text_token)
@@ -884,7 +947,9 @@ class Qwen2LM(TransformerLM):
         speech_token_emb = self.speech_embedding(speech_token)
 
         # 3. prepare llm_input/target
-        lm_target, lm_input, lm_input_len = self.prepare_lm_input_target(text_token, text_token_emb, text_token_len, speech_token, speech_token_emb, speech_token_len)
+        lm_target, lm_input, lm_input_len = self.prepare_lm_input_target(
+            text_token, text_token_emb, text_token_len, speech_token,
+            speech_token_emb, speech_token_len, embedding=embedding)
         lm_target = lm_target.to(device)
 
         # 4. run lm forward
@@ -944,10 +1009,10 @@ class Qwen2LM(TransformerLM):
     @torch.inference_mode()
     def inference(
             self,
-            text: torch.Tensor,
-            text_len: torch.Tensor,
-            prompt_text: torch.Tensor,
-            prompt_text_len: torch.Tensor,
+            text: Union[torch.Tensor, Tuple],
+            text_len: Union[torch.Tensor, Tuple],
+            prompt_text: Union[torch.Tensor, Tuple],
+            prompt_text_len: Union[torch.Tensor, Tuple],
             prompt_speech_token: torch.Tensor,
             prompt_speech_token_len: torch.Tensor,
             embedding: torch.Tensor,
@@ -956,6 +1021,20 @@ class Qwen2LM(TransformerLM):
             min_token_text_ratio: float = 2,
             uuid: str = '',
     ) -> Generator[torch.Tensor, None, None]:
+        if isinstance(text, Tuple):
+            text, pho = text  # here we only use text, the phoneme is not used
+            text_len, pho_len = text_len
+            prompt_text, prompt_pho = prompt_text
+            prompt_text_len, prompt_pho_len = prompt_text_len
+
+        if self.use_embedding:
+            embedding = embedding
+            embedding = F.normalize(embedding, dim=1)
+            embedding = self.spk_embed_affine_layer(embedding)
+            embedding = embedding.unsqueeze(1)
+        else:
+            embedding = None
+
         device = text.device
         text = torch.concat([prompt_text, text], dim=1)
         text_len += prompt_text_len
@@ -968,7 +1047,11 @@ class Qwen2LM(TransformerLM):
             prompt_speech_token_emb = self.speech_embedding(prompt_speech_token)
         else:
             prompt_speech_token_emb = torch.zeros(1, 0, self.llm_input_size, dtype=text.dtype).to(device)
-        lm_input = torch.concat([sos_eos_emb, text, task_id_emb, prompt_speech_token_emb], dim=1)
+
+        if self.use_embedding:
+            lm_input = torch.concat([sos_eos_emb, embedding, text, task_id_emb, prompt_speech_token_emb], dim=1)
+        else:
+            lm_input = torch.concat([sos_eos_emb, text, task_id_emb, prompt_speech_token_emb], dim=1)
 
         # 4. cal min/max_length
         min_len = int((text_len - prompt_text_len) * min_token_text_ratio)
@@ -980,32 +1063,59 @@ class Qwen2LM(TransformerLM):
 
     @torch.inference_mode()
     def inference_wrapper(self, lm_input, sampling, min_len, max_len, uuid):
-        if hasattr(self, 'vllm'):
+
+        if self.use_vllm:
             from vllm import SamplingParams, RequestOutput
-            sampling_params = SamplingParams(top_k=sampling,
-                                             stop_token_ids=self.stop_token_ids,
-                                             min_tokens=min_len,
-                                             max_tokens=max_len)
+            sampling_params = SamplingParams(
+                min_p=self.vllm_sample_params['min_p'],
+                top_k=self.vllm_sample_params['top_k'],  #
+                top_p=self.vllm_sample_params['top_p'],  # 默认1.0
+                temperature=self.vllm_sample_params['temperature'],  # 默认1.0
+                repetition_penalty=self.vllm_sample_params['repetition_penalty'],  # 默认1.0
+                stop_token_ids=self.stop_token_ids,
+                min_tokens=min_len,
+                max_tokens=max_len)
+
             with self.lock:
-                self.vllm.add_request(uuid, {"prompt_embeds": lm_input.squeeze(0).to(torch.bfloat16).to(lm_input.device)}, sampling_params)
+                self.vllm.add_request(uuid, {
+                    "prompt_embeds": lm_input.squeeze(0).to(torch.bfloat16).to(
+                        lm_input.device)}, sampling_params)
                 self.vllm_output_queue[uuid] = queue.Queue()
             out_tokens = []
-            while True:
+            vllm_step_count = 0    # vllm step count
+            request_finished = False
+            while self.vllm.has_unfinished_requests():
                 with self.lock:
                     if self.vllm_output_queue[uuid].empty() is True:
                         request_outputs: List[RequestOutput] = self.vllm.step()
+                        vllm_step_count += 1
                         for request_output in request_outputs:
                             top_ids = list(request_output.outputs[0].token_ids)[-1]
-                            self.vllm_output_queue[request_output.request_id].put(top_ids)
+                            self.vllm_output_queue[
+                                request_output.request_id].put(top_ids)
+                            if request_output.finished:
+                                request_finished= True
                 if self.vllm_output_queue[uuid].empty() is False:
                     top_ids = self.vllm_output_queue[uuid].get()
                     if top_ids in self.stop_token_ids:
                         break
+                    elif top_ids > self.speech_token_size:
+                        logger.warning(f"================big token！！！{top_ids}")
+                        continue
                     # in stream mode, yield token one by one
                     yield top_ids
                     out_tokens.append(top_ids)
                     if len(out_tokens) == max_len:
                         break
+
+                if vllm_step_count > max_len * 2:  # vllm.step() 设定为最大生成长度的2倍
+                    logger.warning(f"Terminating request {uuid}, vllm steps exceed max token len {max_len} * 2.")
+                    break
+                if request_finished:
+                    logger.warning(f"Terminating request {uuid} because request finished without stop token,"
+                                   f" self.vllm.has_unfinished_requests():{self.vllm.has_unfinished_requests()} ")
+                    break
+
                 time.sleep(0.001)
             with self.lock:
                 self.vllm_output_queue.pop(uuid)
@@ -1021,6 +1131,9 @@ class Qwen2LM(TransformerLM):
                 if top_ids == self.speech_token_size:
                     break
                 if top_ids > self.speech_token_size:
+                    continue
+                elif top_ids > self.speech_token_size:
+                    logger.warning(f"================big token！！！{top_ids}")
                     continue
                 # in stream mode, yield token one by one
                 yield top_ids
@@ -2639,7 +2752,7 @@ class Qwen2LM_Phoneme_Sglang(torch.nn.Module):
 
                     if top_ids == self.speech_token_size:
                         break
-                    if top_ids > self.speech_token_size:  # sglang推理时会对输入embedding进行padding，会增加token个数
+                    elif top_ids > self.speech_token_size:  # sglang推理时会对输入embedding进行padding，会增加token个数
                         logger.warning(f"================big token！！！{top_ids}")
                         continue
 
@@ -2660,7 +2773,7 @@ class Qwen2LM_Phoneme_Sglang(torch.nn.Module):
                                             ignore_eos=True if i < min_len else False).item()
                 if top_ids == self.speech_token_size:
                     break
-                if top_ids > self.speech_token_size:
+                elif top_ids > self.speech_token_size:
                     logger.warning(f"================big token！！！{top_ids}")
                     continue
                 # in stream mode, yield token one by one
@@ -2948,6 +3061,9 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
                     top_ids = self.vllm_output_queue[uuid].get()
                     if top_ids in self.stop_token_ids:
                         break
+                    elif top_ids > self.speech_token_size:
+                        logger.warning(f"================big token！！！{top_ids}")
+                        continue
                     # in stream mode, yield token one by one
                     yield top_ids
                     out_tokens.append(top_ids)
@@ -2981,7 +3097,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
                                             ignore_eos=True if i < min_len else False).item()
                 if top_ids == self.speech_token_size:
                     break
-                if top_ids > self.speech_token_size:
+                elif top_ids > self.speech_token_size:
                     logger.warning(f"================big token！！！{top_ids}")
                     continue
                 # in stream mode, yield token one by one

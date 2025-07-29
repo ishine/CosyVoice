@@ -5,7 +5,7 @@ __set_seed3: !apply:torch.manual_seed [1986]
 __set_seed4: !apply:torch.cuda.manual_seed_all [1986]
 
 dtype: 'bf16'
-use_embedding: False    # 自回归模块是否使用embedding
+use_embedding: True    # 自回归模块是否使用embedding
 
 # fixed params
 codec_type: "s3tokenizer_v2"
@@ -33,6 +33,8 @@ llm: !new:cosyvoice.llm.llm.Qwen2LM
     length_normalized_loss: True
     lsm_weight: 0
     mix_ratio: [5, 15]
+    use_embedding: !ref <use_embedding>
+    spk_embed_dim: !ref <spk_embed_dim>
     llm: !new:cosyvoice.llm.llm.Qwen2Encoder
         pretrain_path: !ref <qwen_pretrain_path>
     sampling: !name:cosyvoice.utils.common.non_random_ras_sampling

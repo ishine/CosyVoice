@@ -6,22 +6,22 @@ stage=0
 stop_stage=0
 
 # train llm_pho
-export CUDA_VISIBLE_DEVICES="0,1,2,3"
+export CUDA_VISIBLE_DEVICES="4,5,6,7"
 num_gpus=$(echo $CUDA_VISIBLE_DEVICES | awk -F "," '{print NF}')
 job_id=1986
 dist_backend="nccl"
 num_workers=1
 prefetch=100
 train_engine=torch_ddp
-exp_name=llm_bpe_49w
-exp_conf=cosyvoice_bpe
+exp_name=llm_bpe_49w1
+exp_conf=cosyvoice_bpe1
 pretrained_model_dir=exp/$exp_name
 
 if [ ${stage} -le 0 ] && [ ${stop_stage} -ge 0 ]; then
   if [ $train_engine == 'deepspeed' ]; then
     echo "Notice deepspeed has its own optimizer config. Modify conf/ds_stage2.json if necessary"
   fi
-portnum=2100
+portnum=2200
 # --rdzv_id=$job_id --rdzv_backend="c10d" --rdzv_endpoint="localhost:0" \
 run_command() {
   for model in $exp_name; do
