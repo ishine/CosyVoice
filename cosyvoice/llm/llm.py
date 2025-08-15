@@ -13,9 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os.path
-import queue
 import time
-import threading
 from typing import Dict, Optional, Callable, List, Generator, Tuple, Union
 import torch
 from torch import nn
@@ -827,11 +825,10 @@ class Qwen2LM(TransformerLM):
         # 5. vllm related
         self.stop_token_ids = [speech_token_size + i for i in range(3)]
         self.vllm_output_queue = {}
-        self.lock = threading.Lock()
         self.use_vllm = (qwen_sglang_config is not None)
         self.vllm_sample_params = vllm_sample_params
         logger.info(f"vllm sampling params: {vllm_sample_params}")
-        if self.use_vllm:
+        if self.use_vllm and 0==1:
             os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"  # 默认后端为Flash-Attn, 改为FlashInfer
             python_bin_dir = os.path.dirname(sys.executable)
             custom_env = os.environ.copy()
@@ -1007,7 +1004,7 @@ class Qwen2LM(TransformerLM):
         return {'loss': loss, 'acc': acc, 'chosen_logps': chosen_logps, 'rejected_logps': rejected_logps}
 
     @torch.inference_mode()
-    def inference(
+    async def inference(
             self,
             text: Union[torch.Tensor, Tuple],
             text_len: Union[torch.Tensor, Tuple],
@@ -1058,11 +1055,11 @@ class Qwen2LM(TransformerLM):
         max_len = int((text_len - prompt_text_len) * max_token_text_ratio)
 
         # 5. step by step decode
-        for token in self.inference_wrapper(lm_input, sampling, min_len, max_len, uuid):
+        async for token in self.inference_wrapper(lm_input, sampling, min_len, max_len, uuid):
             yield token
 
     @torch.inference_mode()
-    def inference_wrapper(self, lm_input, sampling, min_len, max_len, uuid):
+    async def inference_wrapper(self, lm_input, sampling, min_len, max_len, uuid):
 
         if self.use_vllm:
             from vllm import SamplingParams, RequestOutput
@@ -1076,49 +1073,29 @@ class Qwen2LM(TransformerLM):
                 min_tokens=min_len,
                 max_tokens=max_len)
 
-            with self.lock:
-                self.vllm.add_request(uuid, {
-                    "prompt_embeds": lm_input.squeeze(0).to(torch.bfloat16).to(
-                        lm_input.device)}, sampling_params)
-                self.vllm_output_queue[uuid] = queue.Queue()
-            out_tokens = []
-            vllm_step_count = 0    # vllm step count
-            request_finished = False
-            while self.vllm.has_unfinished_requests():
-                with self.lock:
-                    if self.vllm_output_queue[uuid].empty() is True:
-                        request_outputs: List[RequestOutput] = self.vllm.step()
-                        vllm_step_count += 1
-                        for request_output in request_outputs:
-                            top_ids = list(request_output.outputs[0].token_ids)[-1]
-                            self.vllm_output_queue[
-                                request_output.request_id].put(top_ids)
-                            if request_output.finished:
-                                request_finished= True
-                if self.vllm_output_queue[uuid].empty() is False:
-                    top_ids = self.vllm_output_queue[uuid].get()
-                    if top_ids in self.stop_token_ids:
-                        break
-                    elif top_ids > self.speech_token_size:
-                        logger.warning(f"================big token！！！{top_ids}")
-                        continue
-                    # in stream mode, yield token one by one
-                    yield top_ids
-                    out_tokens.append(top_ids)
-                    if len(out_tokens) == max_len:
-                        break
+            async for output in self.vllm.generate(
+                    {
+                        "prompt_embeds": lm_input.squeeze(
+                            0).to(torch.bfloat16).to(lm_input.device),
+                    },
+                    sampling_params=sampling_params,
+                    request_id=uuid or f"{time.time()}",
+            ):
+                # top_id = output.outputs[0]
+                top_id = list(output.outputs[0].token_ids)[-1]
+                finished = output.finished
 
-                if vllm_step_count > max_len * 2:  # vllm.step() 设定为最大生成长度的2倍
-                    logger.warning(f"Terminating request {uuid}, vllm steps exceed max token len {max_len} * 2.")
+                if top_id in self.stop_token_ids:
                     break
-                if request_finished:
-                    logger.warning(f"Terminating request {uuid} because request finished without stop token,"
-                                   f" self.vllm.has_unfinished_requests():{self.vllm.has_unfinished_requests()} ")
+                elif top_id > self.speech_token_size:
+                    logger.warning(f"================big token！！！{top_id}")
+                    continue
+                # in stream mode, yield token one by one
+                yield top_id
+
+                if finished:
                     break
 
-                time.sleep(0.001)
-            with self.lock:
-                self.vllm_output_queue.pop(uuid)
         else:
             out_tokens = []
             cache = None
@@ -1978,54 +1955,27 @@ class Qwen2LM_Phoneme_Src2(torch.nn.Module):
         sos_eos_emb = self.llm_embedding.weight[self.sos_eos].reshape(1, 1, -1)
         task_id_emb = self.llm_embedding.weight[self.task_id].reshape(1, 1, -1)
 
-        use_quant = False
-        quant_type = torch.float32
-        if self.qwen_dtype == 'bf16':
-            use_quant = True
-            quant_type = torch.bfloat16
-            autocast = torch.cuda.amp.autocast(enabled=True,
-                                               dtype=quant_type)
-        elif self.qwen_dtype == 'fp16':
-            use_quant = True
-            quant_type = torch.float16
-            autocast = torch.cuda.amp.autocast(enabled=True,
-                                               dtype=quant_type)
-        else:
-            autocast = torch.cuda.amp.autocast(enabled=False)
+        # 4. encode speech_token
+        speech_token = self.speech_embedding(speech_token)
 
-        # 下面几步在加速框架中以半精度进行加速推理
-        if use_quant:  # 模拟推理时量化损失
-            self.speech_embedding = self.speech_embedding.to(quant_type).to(torch.float32)
-            self.llm = self.llm.to(quant_type).to(torch.float32)
-            self.llm_decoder = self.llm_decoder.to(quant_type).to(torch.float32)
-        with autocast:
-            # 4. encode speech_token
-            speech_token = self.speech_embedding(speech_token)
+        # 5. unpad and pad
+        lm_input, lm_input_len = self.pad_unpad_sequence(
+            sos_eos_emb, embedding, pho_token, pho_token_len,
+            task_id_emb, speech_token, speech_token_len)
 
-            # 5. unpad and pad
-            lm_input, lm_input_len = self.pad_unpad_sequence(
-                sos_eos_emb, embedding, pho_token, pho_token_len,
-                task_id_emb, speech_token, speech_token_len)
-            if use_quant:  # 模拟推理时量化损失
-                lm_input = lm_input.to(quant_type).to(torch.float32)
+        # 6. run lm forward
+        # llm_input_mask = torch.tril(torch.ones((
+        #     lm_input.size(0), lm_input.size(1), lm_input.size(1)),
+        #     device=lm_input.device)).to(torch.bool)   # B T T 三角矩阵，只attention前文
+        llm_input_mask = ~make_pad_mask(lm_input_len, lm_input.size(1)).unsqueeze(1)  # (B, 1, T)
+        # 目前训练时使用全局attention, 不设置动态chunk和固定chunk
+        llm_input_mask = add_optional_chunk_mask(
+            lm_input, llm_input_mask, use_dynamic_chunk=False,
+            use_dynamic_left_chunk=False, decoding_chunk_size=-1,
+            static_chunk_size=-1, num_decoding_left_chunks=-1)    # B, T, T
 
-            # 6. run lm forward
-            # llm_input_mask = torch.tril(torch.ones((
-            #     lm_input.size(0), lm_input.size(1), lm_input.size(1)),
-            #     device=lm_input.device)).to(torch.bool)   # B T T 三角矩阵，只attention前文
-            llm_input_mask = ~make_pad_mask(lm_input_len, lm_input.size(1)).unsqueeze(1)  # (B, 1, T)
-            # 目前训练时使用全局attention, 不设置动态chunk和固定chunk
-            llm_input_mask = add_optional_chunk_mask(
-                lm_input, llm_input_mask, use_dynamic_chunk=False,
-                use_dynamic_left_chunk=False, decoding_chunk_size=-1,
-                static_chunk_size=-1, num_decoding_left_chunks=-1)    # B, T, T
-
-            lm_output, lm_output_mask = self.llm.forward_one_step(lm_input, llm_input_mask.to(device))
-            if use_quant:  # 模拟推理时量化损失
-                lm_output = lm_output.to(quant_type).to(torch.float32)
-            logits = self.llm_decoder(lm_output)
-            if use_quant:  # 模拟推理时量化损失
-                logits = logits.to(quant_type).to(torch.float32)
+        lm_output, lm_output_mask = self.llm.forward_one_step(lm_input, llm_input_mask.to(device))
+        logits = self.llm_decoder(lm_output)
 
         loss = self.criterion_ce(logits, lm_target)
         acc = th_accuracy(logits.view(-1, self.speech_token_size + 3),
@@ -2063,6 +2013,7 @@ class Qwen2LM_Phoneme_Src2(torch.nn.Module):
             sampling: int = 25,
             max_token_text_ratio: float = 20,
             min_token_text_ratio: float = 2,
+            uuid: str='',
     ) -> Generator[torch.Tensor, None, None]:
         device = embedding.device
 
@@ -2667,6 +2618,7 @@ class Qwen2LM_Phoneme_Sglang(torch.nn.Module):
             sampling: int = 25,
             max_token_text_ratio: float = 20,
             min_token_text_ratio: float = 2,
+            uuid: str='',
     ) -> Generator[torch.Tensor, None, None]:
         device = embedding.device
 
@@ -2883,9 +2835,8 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
         # 5. vllm related
         self.stop_token_ids = [speech_token_size + i for i in range(3)]
         self.vllm_output_queue = {}
-        self.lock = threading.Lock()
         self.use_vllm = (qwen_sglang_config is not None)
-        if self.use_vllm:
+        if self.use_vllm and 0==1:  # 在外部单独事件循环中创建vllm
             os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"  # 默认后端为Flash-Attn, 改为FlashInfer
             python_bin_dir = os.path.dirname(sys.executable)
             custom_env = os.environ.copy()
@@ -2897,7 +2848,10 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
             from vllm import ModelRegistry
             from cosyvoice.vllm.cosyvoice2 import CosyVoice2ForCausalLM
             ModelRegistry.register_model("CosyVoice2ForCausalLM", CosyVoice2ForCausalLM)
-            from vllm import EngineArgs, LLMEngine
+            # from vllm import EngineArgs, LLMEngine   # 同步
+            from vllm import AsyncLLMEngine as LLMEngine  # 异步
+            from vllm.engine.arg_utils import AsyncEngineArgs as EngineArgs
+
             engine_args = EngineArgs(model=model_path,
                                      skip_tokenizer_init=True,
                                      enable_prompt_embeds=True,
@@ -2954,7 +2908,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
         return top_ids
 
     @torch.inference_mode()
-    def inference(
+    async def inference(
             self,
             text: Tuple,
             text_len: Tuple,
@@ -3027,7 +2981,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
 
         # 5. step by step decode
         if self.use_vllm:
-            from vllm import SamplingParams, RequestOutput
+            from vllm import SamplingParams
             sampling_params = SamplingParams(
                 min_p=self.vllm_sample_params['min_p'],
                 top_k=self.vllm_sample_params['top_k'],  #
@@ -3038,49 +2992,29 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
                 min_tokens=min_len,
                 max_tokens=max_len)
 
-            with self.lock:
-                self.vllm.add_request(uuid, {
-                    "prompt_embeds": lm_input.squeeze(0).to(torch.bfloat16).to(
-                        lm_input.device)}, sampling_params)
-                self.vllm_output_queue[uuid] = queue.Queue()
-            out_tokens = []
-            vllm_step_count = 0    # vllm step count
-            request_finished = False
-            while self.vllm.has_unfinished_requests():
-                with self.lock:
-                    if self.vllm_output_queue[uuid].empty() is True:
-                        request_outputs: List[RequestOutput] = self.vllm.step()
-                        vllm_step_count += 1
-                        for request_output in request_outputs:
-                            top_ids = list(request_output.outputs[0].token_ids)[-1]
-                            self.vllm_output_queue[
-                                request_output.request_id].put(top_ids)
-                            if request_output.finished:
-                                request_finished= True
-                if self.vllm_output_queue[uuid].empty() is False:
-                    top_ids = self.vllm_output_queue[uuid].get()
-                    if top_ids in self.stop_token_ids:
-                        break
-                    elif top_ids > self.speech_token_size:
-                        logger.warning(f"================big token！！！{top_ids}")
-                        continue
-                    # in stream mode, yield token one by one
-                    yield top_ids
-                    out_tokens.append(top_ids)
-                    if len(out_tokens) == max_len:
-                        break
+            async for output in self.vllm.generate(
+                    {
+                        "prompt_embeds": lm_input.squeeze(
+                            0).to(torch.bfloat16).to(lm_input.device),
+                    },
+                    sampling_params=sampling_params,
+                    request_id=uuid or f"{time.time()}",
+            ):
+                # top_id = output.outputs[0]
+                top_id = list(output.outputs[0].token_ids)[-1]
+                finished = output.finished
 
-                if vllm_step_count > max_len * 2:  # vllm.step() 设定为最大生成长度的2倍
-                    logger.warning(f"Terminating request {uuid}, vllm steps exceed max token len {max_len} * 2.")
+                if top_id in self.stop_token_ids:
                     break
-                if request_finished:
-                    logger.warning(f"Terminating request {uuid} because request finished without stop token,"
-                                   f" self.vllm.has_unfinished_requests():{self.vllm.has_unfinished_requests()} ")
+                elif top_id > self.speech_token_size:
+                    logger.warning(f"================big token！！！{top_id}")
+                    continue
+                # in stream mode, yield token one by one
+                yield top_id
+
+                if finished:
                     break
 
-                time.sleep(0.001)
-            with self.lock:
-                self.vllm_output_queue.pop(uuid)
         else:
             out_tokens = []
             cache = None
