@@ -14,6 +14,7 @@
 import logging
 logger = logging.getLogger(__name__)
 import random
+import threading
 from typing import Dict, Optional
 import torch
 import torch.nn as nn
@@ -200,6 +201,7 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         self.only_mask_loss = only_mask_loss
         self.token_mel_ratio = token_mel_ratio
         self.pre_lookahead_len = pre_lookahead_len
+        self.lock = threading.Lock()
 
     def forward(
             self,
@@ -292,7 +294,8 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         token = self.input_embedding(token.long()) * mask
 
         # text encode
-        h, h_lengths = self.encoder(token, token_len)
+        with self.lock:  # JIT模型多线程推理貌似不安全，最好用线程锁阻塞一下
+            h, h_lengths = self.encoder(token, token_len)
         # if finalize is False:
         #     h = h[:, :-self.pre_lookahead_len * self.token_mel_ratio]
         # if not begin:  # 不是开头第一个chunk, 那么需要把拼接的历史codec去掉
