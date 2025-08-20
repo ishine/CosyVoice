@@ -17,7 +17,7 @@ import torch.nn.functional as F
 from cosyvoice.flow.components.flow_matching import BASECFM
 from cosyvoice.utils.common import set_all_random_seed
 import onnxruntime
-import tensorrt
+import threading
 import queue
 
 
@@ -56,6 +56,7 @@ class ConditionalCFM(BASECFM):
         in_channels = in_channels + (spk_emb_dim if n_spks > 0 else 0)
         # Just change the architecture of the estimator here
         self.estimator = estimator
+        self.lock = threading.Lock()
 
     @torch.inference_mode()
     def forward(self, mu, mask, n_timesteps, temperature=1.0, spks=None, cond=None, prompt_len=0, flow_cache=torch.zeros(1, 80, 0, 2)):
@@ -158,31 +159,9 @@ class ConditionalCFM(BASECFM):
             output_onnx = self.estimator.run(None, ort_inputs)[0]
             return torch.from_numpy(output_onnx).to(x.device)
 
-        elif isinstance(self.estimator, tensorrt.ICudaEngine):
-            with torch.cuda.stream(self.stream):
-                self.context.set_input_shape('x', (2, 80, x.size(2)))
-                self.context.set_input_shape('mask', (2, 1, x.size(2)))
-                self.context.set_input_shape('mu', (2, 80, x.size(2)))
-                self.context.set_input_shape('t', (2,))
-                self.context.set_input_shape('spks', (2, 80))
-                self.context.set_input_shape('cond', (2, 80, x.size(2)))
-                output = torch.zeros_like(x)
-                data_ptrs = [x.contiguous().data_ptr(),
-                             mask.contiguous().data_ptr(),
-                             mu.contiguous().data_ptr(),
-                             t.contiguous().data_ptr(),
-                             spks.contiguous().data_ptr(),
-                             cond.contiguous().data_ptr(),
-                             output.contiguous().data_ptr()]
-                for i, j in enumerate(data_ptrs):
-                    self.context.set_tensor_address(self.estimator.get_tensor_name(i), j)
-                # run trt engine
-                assert self.context.execute_async_v3(self.stream.cuda_stream) is True
-                self.stream.synchronize()
-                return output
-
         elif isinstance(self.estimator, TrtContextWrapper):
-            trt_context, trt_engine = self.estimator.acquire_estimator()
+            with self.lock:
+                trt_context, trt_engine = self.estimator.acquire_estimator()
             trt_context.set_input_shape('x', (2, 80, x.size(2)))
             trt_context.set_input_shape('mask', (2, 1, x.size(2)))
             trt_context.set_input_shape('mu', (2, 80, x.size(2)))
@@ -203,8 +182,9 @@ class ConditionalCFM(BASECFM):
             # run trt engine
             assert trt_context.execute_async_v3(
                 torch.cuda.current_stream().cuda_stream) is True
-            torch.cuda.current_stream().synchronize()
-            self.estimator.release_estimator(trt_context)
+            # torch.cuda.current_stream().synchronize()  # 放在外部放回队列之前同步流
+            with self.lock:
+                self.estimator.release_estimator(trt_context)
             return output
 
     def compute_loss(self, x1, mask, mu, spks=None, cond=None, streaming=False):
