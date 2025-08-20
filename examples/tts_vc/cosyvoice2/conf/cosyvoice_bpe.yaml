@@ -5,7 +5,7 @@ __set_seed3: !apply:torch.manual_seed [1986]
 __set_seed4: !apply:torch.cuda.manual_seed_all [1986]
 
 dtype: 'bf16'
-use_embedding: False    # 自回归模块是否使用embedding
+use_embedding: True    # 自回归模块是否使用embedding
 
 # fixed params
 codec_type: "s3tokenizer_v2"
@@ -33,6 +33,8 @@ llm: !new:cosyvoice.llm.llm.Qwen2LM
     length_normalized_loss: True
     lsm_weight: 0
     mix_ratio: [5, 15]
+    use_embedding: !ref <use_embedding>
+    spk_embed_dim: !ref <spk_embed_dim>
     llm: !new:cosyvoice.llm.llm.Qwen2Encoder
         pretrain_path: !ref <qwen_pretrain_path>
     sampling: !name:cosyvoice.utils.common.non_random_ras_sampling
@@ -161,8 +163,10 @@ truncate: !name:cosyvoice.dataset.processor_kaldidata.truncate
 get_transcriber: !name:cosyvoice.dataset.transcriber.get_transcriber
 transcribe: !name:cosyvoice.dataset.processor_kaldidata.transcribe
     get_transcriber: !ref <get_transcriber>
+add_emo_token: !name:cosyvoice.dataset.processor_kaldidata.add_emo_token
 # dataset processor pipeline
 data_pipeline: [
+    !ref <add_emo_token>,   # 先在文本上加上emotion_token
     !ref <mix_text_pinyin>,
     !ref <tokenize>,
     !ref <filter>,
@@ -187,7 +191,7 @@ infer_data_pipeline: [
 train_conf:
     optim: adam
     optim_conf:
-        lr: 0.0001 # change to 1e-5 during sft
+        lr: 0.001  # change to 1e-5 during sft
     scheduler: warmuplr # warmuplr # change to constantlr during sft
     scheduler_conf:
         warmup_steps: 2500
@@ -311,11 +315,56 @@ train_data: [
     [ "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/HighQuality24/HighQuality24" ],
     [ "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/HighQuality24_en/HighQuality24_en" ],
     # 100
+    [ "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/HighQuality25/HighQuality25" ],
+    [ "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/HighQuality25_en/HighQuality25_en" ],
+    [ "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/HighQuality26/HighQuality26" ],
+    [ "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/HighQuality26_en/HighQuality26_en" ],
 
+    # 104
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/DongwuZQ/DongwuZQ" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/DuXY_ManM/DuXY_ManM" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_Musk/ENTTS_Musk" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_Scarlett/ENTTS_Scarlett" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC/ENTTS_VC" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC1/ENTTS_VC1" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC2/ENTTS_VC2" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC3/ENTTS_VC3" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC4/ENTTS_VC4" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC5/ENTTS_VC5" ],
+    #114
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC6/ENTTS_VC6" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/Foreign_IP/Foreign_IP" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/GuangdongTiyu/GuangdongTiyu" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn/IP_chn" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn2/IP_chn2" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn3/IP_chn3" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn4/IP_chn4" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn5/IP_chn5" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn6/IP_chn6" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn7/IP_chn7" ],
+    #124
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_eng/IP_eng" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_eng2/IP_eng2" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_eng3/IP_eng3" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/MengNiu/MengNiu" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/XmovLJ/XmovLJ" ],
+
+    #  中英混
+    ["/data/megastore/SHARE/TTS/VoiceClone3/IP_cnenmix/IP_cnenmix" ],
+    # 多情感
+    ["/data/megastore/SHARE/TTS/MultiEmotion/Batch1/Batch1" ],
+    #131
 ]
 
 train_data_indexes: [
-    [0,1,2,3,4,5]
+    [0,1,2,3,4,5,
+     104,105,
+     106,107,108,109,110,
+     111,112,113,114,115,
+     116,117,118,119,120,
+     121,122,123,124,125,
+     126,127,128,129,130
+    ]
 ]
 
 train_data_indexes1: [
@@ -329,7 +378,7 @@ train_data_indexes1: [
     [66,67], [68,69], [70,71], [72,73], [74,75],
     [76,77], [78,79], [80,81], [82,83], [84,85],
     [86,87], [88,89], [90,91], [92,93], [94,95],
-    [96,97], [98,99],
+    [96,97], [98,99], [100,101], [102,103],
 ]
 
 cv_data: [

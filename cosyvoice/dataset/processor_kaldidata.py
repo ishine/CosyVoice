@@ -216,9 +216,9 @@ def truncate(data, truncate_length=24576, mode='train'):
         yield sample
 
 def truncate_phoneme_sequence(
-        data, prob=0.5,
-        prosody_weights={'#1': 0.5, '#2': 1, '#3': 1},
-        prosody_len={'#1': 0.001, '#2': 0.25, '#3': 0.35},
+        data, prob=0.1,
+        prosody_weights={'#1': 0.1, '#2': 1, '#3': 1},
+        prosody_len={'#1': 0.05, '#2': 0.25, '#3': 0.35},
         min_len=2, min_dur=0.08, mode='train'):
     '''
     truncate the input phoneme sequence, get corresponding speech clip according to the MFA duration
@@ -227,40 +227,44 @@ def truncate_phoneme_sequence(
         assert 'speech' in sample
         assert 'sample_rate' in sample
         assert 'pho' in sample
-        assert 'mfa_duration' in sample
 
-        sr = sample['sample_rate']
-        wav = sample['speech']
-        pho = sample['pho']
-        mfa_duration = sample['mfa_duration']
-        if random.random() < prob:
-            if len(wav) / sr - np.sum(mfa_duration) > 0.2:
-                logging.warning(f"{sample['wav']} mfa duration not match wav duration")
-                continue
+        # 如果数据没有mfa时长，直接返回
+        if not 'mfa_duration' in sample:
+            yield sample
+        else:
+            assert 'mfa_duration' in sample
+            sr = sample['sample_rate']
+            wav = sample['speech']
+            pho = sample['pho']
+            mfa_duration = sample['mfa_duration']
+            if random.random() < prob:
+                if len(wav) / sr - np.sum(mfa_duration) > 0.2:
+                    logging.warning(f"{sample['wav']} mfa duration not match wav duration")
+                    continue
 
-            if len(pho) != len(mfa_duration):
-                logging.warning(f"{sample['wav']} mfa duration not match pho sequence")
-                continue
+                if len(pho) != len(mfa_duration):
+                    logging.warning(f"{sample['wav']} mfa duration not match pho sequence")
+                    continue
 
-            # find all #1, #2, #3, assign different weights
-            truncate_indexs = [i for i, x in enumerate(pho) if x in ['#1', '#2', '#3'] and i > min_len]
-            weights = [prosody_weights[x] for i, x in enumerate(pho) if x in ['#1', '#2', '#3'] and i > min_len]
+                # find all #1, #2, #3, assign different weights
+                truncate_indexs = [i for i, x in enumerate(pho) if x in ['#1', '#2', '#3'] and i > min_len]
+                weights = [prosody_weights[x] for i, x in enumerate(pho) if x in ['#1', '#2', '#3'] and i > min_len]
 
-            if truncate_indexs != []:
-                index = random.choices(truncate_indexs, weights)[0]
-                duration = np.sum(mfa_duration[:index + 1])
-                if duration > min_dur:  # must larger than 0.5s
-                    wav = wav[:, :int(duration * sr)]  # 1, T
-                    # pad sil
-                    pad_len = int(prosody_len[pho[index]] * sr)
-                    wav = F.pad(wav, (0, pad_len), value=0)
-                    pho = pho[:index+1]
+                if truncate_indexs != []:
+                    index = random.choices(truncate_indexs, weights)[0]
+                    duration = np.sum(mfa_duration[:index + 1])
+                    if duration > min_dur:  # must larger than 0.5s
+                        wav = wav[:, :int(duration * sr)]  # 1, T
+                        # pad sil
+                        pad_len = int(prosody_len[pho[index]] * sr)
+                        wav = F.pad(wav, (0, pad_len), value=0)
+                        pho = pho[:index+1]
 
-        sample['pho'] = pho
-        sample['speech'] = wav
-        del sample['mfa_duration']
+            sample['pho'] = pho
+            sample['speech'] = wav
+            del sample['mfa_duration']
 
-        yield sample
+            yield sample
 
 
 def compute_fbank(data,
@@ -373,6 +377,30 @@ def mix_text_pinyin(data, eng_frontend, detect_language,
             text = ori_text
 
         sample['text'] = text
+        yield sample
+
+def add_emo_token(
+        data,
+        emotion_map={
+            -1: ["", ""],
+            0: ["</calm>", "<calm/>"],
+            1: ["</happy>", "<happy/>"],
+            2: ["</sad>", "<sad/>"],
+            3: ["</angry>", "<angry/>"],
+            4: ["<surprised>", "<surprised/>"]
+        },
+        mode='train',
+):
+    for sample in data:
+        assert 'text' in sample
+        assert 'emo' in sample
+        ori_text = sample['text']
+        emotion_lab = sample['emo']
+        emo_start_token = emotion_map[emotion_lab][0]
+        emo_end_token = emotion_map[emotion_lab][1]
+        text_with_emo = f"{emo_start_token}{ori_text}{emo_end_token}"
+        sample['text'] = text_with_emo
+
         yield sample
 
 
@@ -566,6 +594,7 @@ def padding(data, use_spk_embedding, mode='train', gan=False):
 
         utts = [sample[i]['utt'] for i in order]
         spks = [sample[i]['spk'] for i in order]
+        emos = [sample[i]['emo'] for i in order]
         speech = [sample[i]['speech'].squeeze(dim=0) for i in order]
         speech_len = torch.tensor([i.size(0) for i in speech], dtype=torch.int32)
         speech = pad_sequence(speech, batch_first=True, padding_value=0)
@@ -573,6 +602,7 @@ def padding(data, use_spk_embedding, mode='train', gan=False):
         batch = {
             "utts": utts,
             "spks": spks,
+            "emos": emos,
             "speech": speech,
             "speech_len": speech_len,
         }

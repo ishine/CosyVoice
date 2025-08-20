@@ -164,7 +164,18 @@ def main():
                         f"**{k} size is not same in the checkpoint:"
                         f" cur size={v.size()}, "
                         f" saved size={saved_state_dict[k].size()}")
-                    new_state_dict[k] = v
+                    # 专门处理 embedding 扩展的情况
+                    if "embedding" in k and v.size(0) > saved_state_dict[
+                        k].size(0) and v.size(1) == saved_state_dict[k].size(1):
+                        # 先拷贝已有的 140 个
+                        new_weight = v.clone()
+                        new_weight[:saved_state_dict[k].size(0)] = \
+                        saved_state_dict[k]
+                        # 其余的（比如最后一个）保持 v（dest_model 初始化的随机权重）
+                        new_state_dict[k] = new_weight
+                    else:
+                        # 其他情况保持原来的
+                        new_state_dict[k] = v
                 else:
                     new_state_dict[k] = saved_state_dict[k]
 

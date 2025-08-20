@@ -1819,6 +1819,7 @@ class Qwen2LM_Phoneme_Src2(torch.nn.Module):
             use_frontend_prsd: bool = False,
             use_pause_label: bool = False,
             qwen_dtype: str = 'fp32',
+            emotion_num: int = 0,
     ):
         super().__init__()
         self.llm_input_size = llm_input_size
@@ -1835,7 +1836,14 @@ class Qwen2LM_Phoneme_Src2(torch.nn.Module):
         self.use_frontend_prsd = use_frontend_prsd
         self.use_pause_label = use_pause_label
         self.qwen_dtype = qwen_dtype
-        logger.info(f"llm use frontend prosody: {use_frontend_prsd}, use pause label: {use_pause_label}, qwen dtype: {self.qwen_dtype}")
+        self.emotion_num = emotion_num
+        logger.info(f"llm use frontend prosody: {use_frontend_prsd}, "
+                    f"use pause label: {use_pause_label}, "
+                    f"qwen dtype: {self.qwen_dtype}, "
+                    f"emotion_num: {emotion_num}")
+
+        if self.emotion_num > 0:  # emotion_embedding直接放到llm输入前加到音素embedding
+            self.emotion_embedding = torch.nn.Embedding(self.emotion_num, llm_input_size)
 
         self.text_encoder = text_encoder
         self.text_encoder_affine_layer = nn.Linear(
@@ -1920,6 +1928,7 @@ class Qwen2LM_Phoneme_Src2(torch.nn.Module):
         speech_token = batch['speech_token'].to(device)
         speech_token_len = batch['speech_token_len'].to(device)
         embedding = batch['embedding'].to(device)
+        emotion_lab = batch['emos']
 
         # 0. prepare llm_target
         lm_target = [torch.tensor(
@@ -1945,6 +1954,18 @@ class Qwen2LM_Phoneme_Src2(torch.nn.Module):
         for src_attention in self.src_attention:
             pho_token, pho_mask, text_token, text_mask = src_attention(
                 pho_token, pho_mask, text_token, text_mask)
+
+        # pho_token add emotion embedding
+        if self.emotion_num > 0:
+            emotion_emb = []
+            for lab in emotion_lab:
+                if lab < 0:
+                    emotion_emb.append(torch.zeros(self.llm_input_size).reshape(1, 1, -1).to(device))
+                else:
+                    emotion_emb.append(self.emotion_embedding.weight[lab].reshape(1, 1, -1))
+            emotion_emb = torch.cat(emotion_emb, dim=0)  # B 1 D
+
+            pho_token += emotion_emb  # B L D
 
         # 2. embedding projection
         embedding = F.normalize(embedding, dim=1)

@@ -294,8 +294,8 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         token = self.input_embedding(token.long()) * mask
 
         # text encode
-        with self.lock:  # JIT模型多线程推理貌似不安全，最好用线程锁阻塞一下
-            h, h_lengths = self.encoder(token, token_len)
+        # with self.lock:  # JIT模型多线程推理貌似不安全，最好用线程锁阻塞一下
+        h, h_lengths = self.encoder(token, token_len)
         # if finalize is False:
         #     h = h[:, :-self.pre_lookahead_len * self.token_mel_ratio]
         # if not begin:  # 不是开头第一个chunk, 那么需要把拼接的历史codec去掉

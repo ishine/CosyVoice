@@ -110,7 +110,8 @@ class DistributedSampler:
 class DataList(IterableDataset):
 
     def __init__(self, lists, utt2wav, utt2text, utt2pho, utt2spk, utt2dur=None,
-                 shuffle=True, partition=True, tts_text=None, eval=False, need_text=True):
+                 shuffle=True, partition=True, tts_text=None, eval=False,
+                 need_text=True, utt2emo={}):
         self.lists = lists
         self.utt2wav = utt2wav
         self.utt2text = utt2text
@@ -119,6 +120,7 @@ class DataList(IterableDataset):
         self.utt2dur = utt2dur
         self.tts_text = tts_text  # a list, each prompt will generate all texts in the list
         self.need_text = need_text
+        self.utt2emo = utt2emo
         if not eval:
             self.sampler = DistributedSampler(shuffle, partition)
         else:
@@ -156,6 +158,11 @@ class DataList(IterableDataset):
                 sample['spk'] = self.utt2spk[utt]
             else:
                 sample['spk'] = utt
+
+            if utt in self.utt2emo:
+                sample['emo'] = self.utt2emo[utt]
+            else:
+                sample['emo'] = -1  # 不带情绪标签的，设为-1
 
             if self.utt2dur is not None and utt in self.utt2dur:
                 sample['mfa_duration'] = self.utt2dur[utt]
@@ -232,6 +239,7 @@ def Dataset(json_file,
     utt2spk = {}
     utt2text = {}
     utt2dur = {}
+    utt2emo = {}
     valid_utt_list = []
 
     def add_one_data(json_file):
@@ -298,6 +306,18 @@ def Dataset(json_file,
                     continue
                 utt2text[utt] = text
 
+        emo_path = os.path.join(kaldi_data_dir, "utt2emo")
+        if os.path.exists(emo_path):
+            with open(emo_path, 'r', encoding='utf-8') as ftext:
+                for line in ftext:
+                    line = line.strip().split(maxsplit=1)
+                    if len(line) != 2:
+                        continue
+                    utt, emo = line[0], line[1]
+                    utt = f"{data_name}-{utt}"
+                    utt2emo[utt] = int(emo)
+
+
         del dataset_info
         logging.info(f"Current utts: {len(utt2wav.keys())}. total samples: {len(valid_utt_list)}, duplicated:{duplicated_utt}")
 
@@ -320,9 +340,11 @@ def Dataset(json_file,
                 tts_text.append(line)
             logging.info(f"read {len(tts_text)} lines from {tts_file}")
 
-    dataset = DataList(valid_utt_list, utt2wav, utt2text, utt2pho, utt2spk,
-                       utt2dur, shuffle=shuffle, partition=partition,
-                       tts_text=tts_text, eval=eval, need_text=need_text)
+    dataset = DataList(
+        valid_utt_list, utt2wav, utt2text, utt2pho, utt2spk, utt2dur,
+        shuffle=shuffle, partition=partition, tts_text=tts_text,
+        eval=eval, need_text=need_text, utt2emo=utt2emo
+    )
 
     if gan is True:
         # map partial arg to padding func in gan mode

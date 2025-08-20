@@ -22,6 +22,7 @@ rich_sample_short_utt: 10
 s3tokenizer_ckpt: "../../../pretrained_models/s3tokenizer"
 speaker_encoder_ckpt: "../../../pretrained_models/speaker_encoder_v2.pt"
 use_pause_label: True  # whether use human labeled or MFA aligned pause labels
+emotion_num: 5      # types of emotion
 
 
 # model params
@@ -32,7 +33,7 @@ llm: !new:cosyvoice.llm.llm.Qwen2LM_Phoneme_Src2
     llm_input_size: !ref <llm_input_size>
     llm_output_size: !ref <llm_output_size>
     # make sure total dimension of (phoneme, tone, lang, prsd)'s sum equals to text_encoder_input_size
-    text_token_size:  140  # phoneme size
+    text_token_size:  141  # phoneme size  # 音素AX变成了140
     text_token_dim: 400
     text_tone_size: 16     # tone size
     text_tone_dim: 64
@@ -47,6 +48,7 @@ llm: !new:cosyvoice.llm.llm.Qwen2LM_Phoneme_Src2
     use_frontend_prsd: !ref <use_pause_label>
     use_pause_label: !ref <use_pause_label>
     qwen_dtype: !ref <dtype>
+    emotion_num: !ref <emotion_num>
     text_encoder: !new:cosyvoice.transformer.encoder.ConformerEncoder
         input_size: !ref <text_encoder_input_size>
         output_size: 1024
@@ -235,7 +237,7 @@ train_conf:
     save_per_step: 10000
 
 # multiple train data dir
-train_data: [
+train_data0: [
     [ "/data/megastore/SHARE/TTS/VoiceClone/ENTTS/ENTTS.vits.json",1,1 ],
     [ "/data/megastore/SHARE/TTS/VoiceClone/NTTS/NTTS.vits.json",0,1 ],
     [ "/data/megastore/SHARE/TTS/VoiceClone/LTTS/LTTS.vits.json",0,1 ],
@@ -424,8 +426,58 @@ train_data: [
 
 ]
 
+train_data: [
+    [ "/data/megastore/SHARE/TTS/VoiceClone/ENTTS/ENTTS.nomfa.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone/NTTS/NTTS.nomfa.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone/LTTS/LTTS.vits.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone/MSTTS_CN/MSTTS_CN.vits.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone/MSTTS_EN/MSTTS_EN.vits.json",1,1 ],
+
+    [ "/data/megastore/SHARE/TTS/VoiceClone/ENTTS_LibriTTS/ENTTS_LibriTTS.vits.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/DongwuZQ/DongwuZQ.vits.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_Musk/ENTTS_Musk.vits.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_Scarlett/ENTTS_Scarlett.vits.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC/ENTTS_VC.vits.json",1,1 ],
+
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC1/ENTTS_VC1.vits.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC2/ENTTS_VC2.vits.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC3/ENTTS_VC3.vits.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC4/ENTTS_VC4.vits.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC5/ENTTS_VC5.vits.json",1,1 ],
+
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC6/ENTTS_VC6.vits.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/Foreign_IP/Foreign_IP.vits.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/GuangdongTiyu/GuangdongTiyu.vits.json",0,1" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn/IP_chn.nomfa.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn2/IP_chn2.nomfa.json",0,1 ],
+
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn3/IP_chn3.nomfa.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn4/IP_chn4.nomfa.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn5/IP_chn5.nomfa.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn6/IP_chn6.nomfa.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn7/IP_chn7.nomfa.json",0,1 ],
+
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_eng/IP_eng.nomfa.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_eng2/IP_eng2.nomfa.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_eng3/IP_eng3.nomfa.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/MengNiu/MengNiu.vits.json",0,1" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/XmovLJ/XmovLJ.vits.json",0,1" ],
+
+    #  中英混
+    ["/data/megastore/SHARE/TTS/VoiceClone3/IP_cnenmix/IP_cnenmix.nomfa.json",0,1 ],
+    # 多情感
+    ["/data/megastore/SHARE/TTS/MultiEmotion/Batch1/Batch1.nomfa.json",0,1 ],
+
+]
+
+
 train_data_indexes: [
-    [0,1,2,3,4,5]
+    [
+        0,1,2,3,4,5,6,7,8,9,
+        10,11,12,13,14,15,16,17,18,19,
+        20,21,22,23,24,25,26,27,28,29,
+        30,31
+    ]
 ]
 
 train_data_indexes1: [

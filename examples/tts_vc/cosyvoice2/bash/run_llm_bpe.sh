@@ -10,10 +10,10 @@ export CUDA_VISIBLE_DEVICES="0,1,2,3"
 num_gpus=$(echo $CUDA_VISIBLE_DEVICES | awk -F "," '{print NF}')
 job_id=1986
 dist_backend="nccl"
-num_workers=1
+num_workers=4
 prefetch=100
 train_engine=torch_ddp
-exp_name=llm_bpe_49w
+exp_name=llm_bpe_49w1_tts
 exp_conf=cosyvoice_bpe
 pretrained_model_dir=exp/$exp_name
 

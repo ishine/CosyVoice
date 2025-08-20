@@ -109,12 +109,14 @@ class DistributedSampler:
 
 class DataList(IterableDataset):
 
-    def __init__(self, lists, utt2wav, utt2text, utt2spk, shuffle=True, partition=True, tts_text=None):
+    def __init__(self, lists, utt2wav, utt2text, utt2spk, shuffle=True,
+                 partition=True, tts_text=None, utt2emo={}):
         self.lists = lists
         self.utt2wav = utt2wav
         self.utt2text = utt2text
         self.utt2spk = utt2spk
         self.tts_text = tts_text  # a list, each prompt will generate all texts in the list
+        self.utt2emo = utt2emo
         self.sampler = DistributedSampler(shuffle, partition)
 
     def set_epoch(self, epoch):
@@ -134,6 +136,11 @@ class DataList(IterableDataset):
                 sample['spk'] = self.utt2spk[utt]
             else:
                 sample['spk'] = utt
+
+            if utt in self.utt2emo:
+                sample['emo'] = self.utt2emo[utt]
+            else:
+                sample['emo'] = -1  # 没有情绪标签的数据，用-1表示
 
             sample.update(sampler_info)
 
@@ -176,6 +183,7 @@ def Dataset(data_dir,
     utt2wav = {}
     utt2text = {}
     utt2spk = {}
+    utt2emo = {}
 
     def add_one_data(data_dir):
         if isinstance(data_dir, list):
@@ -221,6 +229,15 @@ def Dataset(data_dir,
                     utt, spk = line[0], line[1]
                     utt2spk[utt] = spk
 
+        if os.path.exists(f"{data_dir}/utt2emo"):
+            with open(f"{data_dir}/utt2emo", 'r', encoding='utf-8') as f_emo:
+                for line in f_emo:
+                    line = line.strip().split(maxsplit=1)
+                    if len(line) != 2:
+                        continue
+                    utt, emo = line[0], line[1]
+                    utt2emo[utt] = int(emo)
+
         logging.info(f"Current utts: {len(utt2wav.keys())}")
 
     if isinstance(data_dir, list):
@@ -249,7 +266,8 @@ def Dataset(data_dir,
             logging.info(f"read {len(tts_text)} lines from {tts_file}")
 
     dataset = DataList(valid_utt_list, utt2wav, utt2text, utt2spk,
-                       shuffle=shuffle, partition=partition, tts_text=tts_text)
+                       shuffle=shuffle, partition=partition,
+                       tts_text=tts_text, utt2emo=utt2emo)
 
     if gan is True:
         # map partial arg to padding func in gan mode
