@@ -127,19 +127,35 @@ class ConditionalCFM(BASECFM):
             t_in = torch.zeros([2], device=x.device, dtype=x.dtype)
             spks_in = torch.zeros([2, 80], device=x.device, dtype=x.dtype)
             cond_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
+
+            max_retry_times = 10
             for step in range(1, len(t_span)):
                 # Classifier-Free Guidance inference introduced in VoiceBox
-                x_in[:] = x
                 mask_in[:] = mask
                 mu_in[0] = mu
                 t_in[:] = t.unsqueeze(0)
                 spks_in[0] = spks
                 cond_in[0] = cond
 
-                dphi_dt = self.forward_estimator(
-                    x_in, mask_in,  mu_in, t_in, spks_in, cond_in, streaming,
-                    trt_context=trt_context, trt_stream=trt_stream, trt_engine=trt_engine
-                )
+                retries = 1
+                while retries < max_retry_times:
+                    x_in[:] = x
+                    dphi_dt = self.forward_estimator(
+                        x_in, mask_in,  mu_in, t_in, spks_in, cond_in, streaming,
+                        trt_context=trt_context, trt_stream=trt_stream, trt_engine=trt_engine
+                    )
+                    # 第一步采样时遇到NaN输出，更新X
+                    if step == 1 and torch.isnan(dphi_dt).any():
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.error(f"NaN detected in decoder step {step}, try {retries} time.")
+                        logger.info(f"x:{x}\n mu:{mu}\n, dphi_dt:{dphi_dt}")
+                        x = torch.randn_like(x) / retries   # temperature = 1/retyies
+                        logger.info(f"reset input noise as x: {x} \n")
+                        retries += 1
+                    else:
+                        break
+
                 dphi_dt, cfg_dphi_dt = torch.split(dphi_dt, [x.size(0), x.size(0)], dim=0)
                 dphi_dt = ((1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt)
                 x = x + dt * dphi_dt
@@ -197,12 +213,6 @@ class ConditionalCFM(BASECFM):
                     torch.cuda.current_stream().cuda_stream) is True
                 torch.cuda.current_stream().synchronize()
 
-                if torch.isnan(output).any():
-                    import logging
-                    logger = logging.getLogger(__name__)
-                    logger.error("NaN detected in TRT output!")
-                    logger.error(f"{x}\n {mask}\n {mu}\n {t}\n {spks}\n {cond}\n")
-
                 return output
 
     def compute_loss(self, x1, mask, mu, spks=None, cond=None, streaming=False):
@@ -250,8 +260,6 @@ class ConditionalCFM(BASECFM):
 class CausalConditionalCFM(ConditionalCFM):
     def __init__(self, in_channels, cfm_params, n_spks=1, spk_emb_dim=64, estimator: torch.nn.Module = None):
         super().__init__(in_channels, cfm_params, n_spks, spk_emb_dim, estimator)
-        set_all_random_seed(0)
-        self.rand_noise = torch.randn([1, 80, 50 * 300])
 
     @torch.inference_mode()
     def forward(self, mu, mask, n_timesteps, temperature=1.0, spks=None, cond=None):
@@ -272,8 +280,8 @@ class CausalConditionalCFM(ConditionalCFM):
             sample: generated mel-spectrogram
                 shape: (batch_size, n_feats, mel_timesteps)
         """
-
-        z = self.rand_noise[:, :, :mu.size(2)].to(mu.device).to(mu.dtype) * temperature
+        set_all_random_seed(0)
+        z = torch.randn_like(mu).to(mu.device).to(mu.dtype) * temperature
         # fix prompt and overlap part mu and z
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device, dtype=mu.dtype)
         if self.t_scheduler == 'cosine':

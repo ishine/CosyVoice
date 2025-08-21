@@ -301,6 +301,12 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         # if not begin:  # 不是开头第一个chunk, 那么需要把拼接的历史codec去掉
         #     h = h[:, self.lookback_len * self.token_mel_ratio:]
 
+        if torch.isnan(h).any():
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error("NaN detected in encoder output!")
+            logger.error(f"{token}, {token.size()}")
+
         mel_len1, mel_len2 = prompt_feat.shape[1], h.shape[1] - prompt_feat.shape[1]
         h = self.encoder_proj(h)
 
