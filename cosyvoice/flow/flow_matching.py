@@ -27,19 +27,16 @@ class TrtContextWrapper:
         self.trt_engine = trt_engine
         for _ in range(trt_concurrent):
             trt_context = trt_engine.create_execution_context()
-            # trt_stream = torch.cuda.stream(torch.cuda.Stream(device))
+            trt_stream = torch.cuda.stream(torch.cuda.Stream(device))
             assert trt_context is not None, 'failed to create trt context, maybe not enough CUDA memory, try reduce current trt concurrent {}'.format(trt_concurrent)
-            # self.trt_context_pool.put([trt_context, trt_stream])
-            self.trt_context_pool.put(trt_context)
+            self.trt_context_pool.put([trt_context, trt_stream])
         assert self.trt_context_pool.empty() is False, 'no avaialbe estimator context'
 
     def acquire_estimator(self):
         return self.trt_context_pool.get(), self.trt_engine
 
-    # def release_estimator(self, context, stream):
-    #     self.trt_context_pool.put([context, stream])
-    def release_estimator(self, context):
-        self.trt_context_pool.put(context)
+    def release_estimator(self, context, stream):
+        self.trt_context_pool.put([context, stream])
 
 
 class ConditionalCFM(BASECFM):
@@ -115,32 +112,45 @@ class ConditionalCFM(BASECFM):
         # Or in future might add like a return_all_steps flag
         sol = []
 
-        # Do not use concat, it may cause memory format changed and trt infer with wrong results!
-        x_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
-        mask_in = torch.zeros([2, 1, x.size(2)], device=x.device, dtype=x.dtype)
-        mu_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
-        t_in = torch.zeros([2], device=x.device, dtype=x.dtype)
-        spks_in = torch.zeros([2, 80], device=x.device, dtype=x.dtype)
-        cond_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
-        for step in range(1, len(t_span)):
-            # Classifier-Free Guidance inference introduced in VoiceBox
-            x_in[:] = x
-            mask_in[:] = mask
-            mu_in[0] = mu
-            t_in[:] = t.unsqueeze(0)
-            spks_in[0] = spks
-            cond_in[0] = cond
+        trt_context, trt_stream, trt_engine = None, None, None
+        if isinstance(self.estimator, TrtContextWrapper):
+            with self.lock:
+                [trt_context, trt_stream], trt_engine = self.estimator.acquire_estimator()
+        else:
+            from contextlib import nullcontext
+            trt_stream = nullcontext
+        with trt_stream:   #TensorRT并发推理时，必须把多步采样放到特定cuda stream里面，不然不同进程间Trt推理会相互影响
+            # Do not use concat, it may cause memory format changed and trt infer with wrong results!
+            x_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
+            mask_in = torch.zeros([2, 1, x.size(2)], device=x.device, dtype=x.dtype)
+            mu_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
+            t_in = torch.zeros([2], device=x.device, dtype=x.dtype)
+            spks_in = torch.zeros([2, 80], device=x.device, dtype=x.dtype)
+            cond_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
+            for step in range(1, len(t_span)):
+                # Classifier-Free Guidance inference introduced in VoiceBox
+                x_in[:] = x
+                mask_in[:] = mask
+                mu_in[0] = mu
+                t_in[:] = t.unsqueeze(0)
+                spks_in[0] = spks
+                cond_in[0] = cond
 
-            dphi_dt = self.forward_estimator(
-                x_in, mask_in,  mu_in, t_in, spks_in, cond_in, streaming,
-            )
-            dphi_dt, cfg_dphi_dt = torch.split(dphi_dt, [x.size(0), x.size(0)], dim=0)
-            dphi_dt = ((1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt)
-            x = x + dt * dphi_dt
-            t = t + dt
-            sol.append(x)
-            if step < len(t_span) - 1:
-                dt = t_span[step + 1] - t
+                dphi_dt = self.forward_estimator(
+                    x_in, mask_in,  mu_in, t_in, spks_in, cond_in, streaming,
+                    trt_context=trt_context, trt_stream=trt_stream, trt_engine=trt_engine
+                )
+                dphi_dt, cfg_dphi_dt = torch.split(dphi_dt, [x.size(0), x.size(0)], dim=0)
+                dphi_dt = ((1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt)
+                x = x + dt * dphi_dt
+                t = t + dt
+                sol.append(x)
+                if step < len(t_span) - 1:
+                    dt = t_span[step + 1] - t
+
+        if isinstance(self.estimator, TrtContextWrapper):
+            with self.lock:
+                self.estimator.release_estimator(trt_context, trt_stream)
 
         return sol[-1].float()
 
@@ -160,32 +170,40 @@ class ConditionalCFM(BASECFM):
             return torch.from_numpy(output_onnx).to(x.device)
 
         elif isinstance(self.estimator, TrtContextWrapper):
-            with self.lock:
-                trt_context, trt_engine = self.estimator.acquire_estimator()
-            trt_context.set_input_shape('x', (2, 80, x.size(2)))
-            trt_context.set_input_shape('mask', (2, 1, x.size(2)))
-            trt_context.set_input_shape('mu', (2, 80, x.size(2)))
-            trt_context.set_input_shape('t', (2,))
-            trt_context.set_input_shape('spks', (2, 80))
-            trt_context.set_input_shape('cond', (2, 80, x.size(2)))
-            output = torch.zeros_like(x)
-            data_ptrs = [x.contiguous().data_ptr(),
-                         mask.contiguous().data_ptr(),
-                         mu.contiguous().data_ptr(),
-                         t.contiguous().data_ptr(),
-                         spks.contiguous().data_ptr(),
-                         cond.contiguous().data_ptr(),
-                         output.contiguous().data_ptr()]
-            for i, j in enumerate(data_ptrs):
-                trt_context.set_tensor_address(
-                    trt_engine.get_tensor_name(i), j)
-            # run trt engine
-            assert trt_context.execute_async_v3(
-                torch.cuda.current_stream().cuda_stream) is True
-            # torch.cuda.current_stream().synchronize()  # 放在外部放回队列之前同步流
-            with self.lock:
-                self.estimator.release_estimator(trt_context)
-            return output
+            # 从上层多步采样的地方获取context, stream传进来，上层也需要用特定的stream
+            trt_context = kwargs.get('trt_context')
+            trt_stream = kwargs.get('trt_stream')
+            trt_engine = kwargs.get('trt_engine')
+            with trt_stream:
+                trt_context.set_input_shape('x', (2, 80, x.size(2)))
+                trt_context.set_input_shape('mask', (2, 1, x.size(2)))
+                trt_context.set_input_shape('mu', (2, 80, x.size(2)))
+                trt_context.set_input_shape('t', (2,))
+                trt_context.set_input_shape('spks', (2, 80))
+                trt_context.set_input_shape('cond', (2, 80, x.size(2)))
+                output = torch.zeros_like(x)
+                data_ptrs = [x.contiguous().data_ptr(),
+                             mask.contiguous().data_ptr(),
+                             mu.contiguous().data_ptr(),
+                             t.contiguous().data_ptr(),
+                             spks.contiguous().data_ptr(),
+                             cond.contiguous().data_ptr(),
+                             output.contiguous().data_ptr()]
+                for i, j in enumerate(data_ptrs):
+                    trt_context.set_tensor_address(
+                        trt_engine.get_tensor_name(i), j)
+                # run trt engine
+                assert trt_context.execute_async_v3(
+                    torch.cuda.current_stream().cuda_stream) is True
+                torch.cuda.current_stream().synchronize()
+
+                if torch.isnan(output).any():
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error("NaN detected in TRT output!")
+                    logger.error(f"{x}\n {mask}\n {mu}\n {t}\n {spks}\n {cond}\n")
+
+                return output
 
     def compute_loss(self, x1, mask, mu, spks=None, cond=None, streaming=False):
         """Computes diffusion loss
