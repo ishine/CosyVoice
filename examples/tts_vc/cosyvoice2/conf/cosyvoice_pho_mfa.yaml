@@ -23,12 +23,12 @@ s3tokenizer_ckpt: "../../../pretrained_models/s3tokenizer"
 speaker_encoder_ckpt: "../../../pretrained_models/speaker_encoder_v2.pt"
 use_pause_label: True  # whether use human labeled or MFA aligned pause labels
 emotion_num: 5      # types of emotion
-
+non_emotional_label: -1  # 非多情感数据，标签可选0,-1, 若为-1，对应embedding为全零向量
 
 # model params
 # for all class/function included in this repo, we use !<name> or !<new> for intialization, so that user may find all corresponding class/function according to one single yaml.
 # for system/third_party class/function, we do not require this.
-llm: !new:cosyvoice.llm.llm.Qwen2LM_Phoneme_Src2
+llm: !new:cosyvoice.llm.llm.Qwen2LM_Phoneme_Vllm
     text_encoder_input_size: !ref <text_encoder_input_size>
     llm_input_size: !ref <llm_input_size>
     llm_output_size: !ref <llm_output_size>
@@ -47,8 +47,8 @@ llm: !new:cosyvoice.llm.llm.Qwen2LM_Phoneme_Src2
     spk_embed_dim: !ref <spk_embed_dim>
     use_frontend_prsd: !ref <use_pause_label>
     use_pause_label: !ref <use_pause_label>
-    qwen_dtype: !ref <dtype>
     emotion_num: !ref <emotion_num>
+    non_emotional_label: !ref <non_emotional_label>
     text_encoder: !new:cosyvoice.transformer.encoder.ConformerEncoder
         input_size: !ref <text_encoder_input_size>
         output_size: 1024
@@ -202,7 +202,7 @@ truncate_phoneme_sequence: !name:cosyvoice.dataset.processor_kaldidata.truncate_
 data_pipeline: [
     !ref <filter>,
     !ref <resample>,
-    !ref <truncate_phoneme_sequence>,
+    # !ref <truncate_phoneme_sequence>,
     !ref <tokenize>,
     !ref <tokenize_pho>,    # tokenize_pho 必须在truncate phoneme之后
     !ref <compute_fbank>,
@@ -234,7 +234,7 @@ train_conf:
     grad_clip: 5
     accum_grad: 2
     log_interval: 100
-    save_per_step: 10000
+    save_per_step: 2000
 
 # multiple train data dir
 train_data0: [
@@ -473,9 +473,10 @@ train_data: [
 
 train_data_indexes: [
     [
-        0,1,2,3,4,5,6,7,8,9,
-        10,11,12,13,14,15,16,17,18,19,
-        20,21,22,23,24,25,26,27,28,29,
+        0,1,
+#        2,3,4,5,6,7,8,9,
+#        10,11,12,13,14,15,16,17,18,19,
+#        20,21,22,23,24,25,26,27,28,29,
         30,31
     ]
 ]

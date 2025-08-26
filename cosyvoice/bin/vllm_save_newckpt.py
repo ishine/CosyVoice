@@ -47,7 +47,7 @@ def export_cosyvoice2_vllm(model, model_path, device):
 if __name__ == "__main__":
     pretrain_path = "/data/megastore/SHARE/TTS/LAM_TTS/latest/checkpoints/acoustics/qwen/CosyVoice-BlankEN"
     vc_model_path = "/data/megastore/SHARE/TTS/LAM_TTS/latest/checkpoints/LAM-VC/LLM/llm_v2.pt"
-    vc_config_path = "/data/megastore/SHARE/TTS/LAM_TTS/latest/checkpoints/LAM-VC/vc_config_v2.yaml"
+    vc_config_path = "/data/megastore/SHARE/TTS/LAM_TTS/latest/checkpoints/LAM-VC/vc_config_v2.3.yaml"
     save_root = "/data/megastore/SHARE/TTS/LAM_TTS/latest/checkpoints/LAM-VC/LLM/vllm"
 
     state_dict = torch.load(vc_model_path)
@@ -61,6 +61,6 @@ if __name__ == "__main__":
         })
 
     VC_model = vc_configs['llm']
-    VC_model.load_state_dict(state_dict, strict=False)
+    VC_model.load_state_dict(state_dict, strict=True)
 
     export_cosyvoice2_vllm(VC_model, save_root, 'cpu')

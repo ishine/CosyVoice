@@ -4,7 +4,7 @@ __set_seed2: !apply:numpy.random.seed [1986]
 __set_seed3: !apply:torch.manual_seed [1986]
 __set_seed4: !apply:torch.cuda.manual_seed_all [1986]
 
-# dtype: 'bf16'
+dtype: 'bf16'
 
 # fixed params
 codec_type: "s3tokenizer_v2"
@@ -17,21 +17,23 @@ qwen_pretrain_path: "../../../pretrained_models/CosyVoice2-0.5B/CosyVoice-BlankE
 # second of min length, if the duration of a audio is less than this, it will be duplicated.
 # for speaker audio crop, 0 means do not crop
 spk_audio_crop: 10
-rich_sample_short_utt: 50
+rich_sample_short_utt: 10
 
 s3tokenizer_ckpt: "../../../pretrained_models/s3tokenizer"
 speaker_encoder_ckpt: "../../../pretrained_models/speaker_encoder_v2.pt"
 use_pause_label: True  # whether use human labeled or MFA aligned pause labels
+emotion_num: 5      # types of emotion
+non_emotional_label: 0  # 非多情感数据，标签可选0,-1, 若为-1，对应embedding为全零向量
 
 # model params
 # for all class/function included in this repo, we use !<name> or !<new> for intialization, so that user may find all corresponding class/function according to one single yaml.
 # for system/third_party class/function, we do not require this.
-llm: !new:cosyvoice.llm.llm.Qwen2LM_Phoneme_Src2
+llm: !new:cosyvoice.llm.llm.Qwen2LM_Phoneme_Vllm
     text_encoder_input_size: !ref <text_encoder_input_size>
     llm_input_size: !ref <llm_input_size>
     llm_output_size: !ref <llm_output_size>
     # make sure total dimension of (phoneme, tone, lang, prsd)'s sum equals to text_encoder_input_size
-    text_token_size:  140  # phoneme size
+    text_token_size:  141  # phoneme size  # 音素AX变成了140
     text_token_dim: 400
     text_tone_size: 16     # tone size
     text_tone_dim: 64
@@ -45,6 +47,8 @@ llm: !new:cosyvoice.llm.llm.Qwen2LM_Phoneme_Src2
     spk_embed_dim: !ref <spk_embed_dim>
     use_frontend_prsd: !ref <use_pause_label>
     use_pause_label: !ref <use_pause_label>
+    emotion_num: !ref <emotion_num>
+    non_emotional_label: !ref <non_emotional_label>
     text_encoder: !new:cosyvoice.transformer.encoder.ConformerEncoder
         input_size: !ref <text_encoder_input_size>
         output_size: 1024
@@ -160,9 +164,9 @@ tokenize: !name:cosyvoice.dataset.processor_kaldidata.tokenize
     get_tokenizer: !ref <get_tokenizer>
     allowed_special: !ref <allowed_special>
 filter: !name:cosyvoice.dataset.processor_kaldidata.filter
-    max_length: 3600  # 100 frame per second
+    max_length: 4000  # 100 frame per second
     min_length: 0
-    token_max_length: 480    # phoneme length
+    token_max_length: 512    # phoneme length
     token_min_length: 1
 resample: !name:cosyvoice.dataset.processor_kaldidata.resample
     resample_rate: !ref <sample_rate>
@@ -192,12 +196,15 @@ truncate: !name:cosyvoice.dataset.processor_kaldidata.truncate
 get_transcriber: !name:cosyvoice.dataset.transcriber.get_transcriber
 transcribe: !name:cosyvoice.dataset.processor_kaldidata.transcribe
     get_transcriber: !ref <get_transcriber>
+
+truncate_phoneme_sequence: !name:cosyvoice.dataset.processor_kaldidata.truncate_phoneme_sequence
 # dataset processor pipeline
 data_pipeline: [
-    !ref <tokenize>,
-    !ref <tokenize_pho>,
     !ref <filter>,
     !ref <resample>,
+    # !ref <truncate_phoneme_sequence>,
+    !ref <tokenize>,
+    !ref <tokenize_pho>,    # tokenize_pho 必须在truncate phoneme之后
     !ref <compute_fbank>,
     !ref <shuffle>,
     !ref <sort>,
@@ -227,10 +234,10 @@ train_conf:
     grad_clip: 5
     accum_grad: 2
     log_interval: 100
-    save_per_step: 10000
+    save_per_step: 2000
 
 # multiple train data dir
-train_data: [
+train_data0: [
     [ "/data/megastore/SHARE/TTS/VoiceClone/ENTTS/ENTTS.vits.json",1,1 ],
     [ "/data/megastore/SHARE/TTS/VoiceClone/NTTS/NTTS.vits.json",0,1 ],
     [ "/data/megastore/SHARE/TTS/VoiceClone/LTTS/LTTS.vits.json",0,1 ],
@@ -419,11 +426,59 @@ train_data: [
 
 ]
 
+train_data: [
+    [ "/data/megastore/SHARE/TTS/VoiceClone/ENTTS/ENTTS.nomfa.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone/NTTS/NTTS.nomfa.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone/LTTS/LTTS.vits.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone/MSTTS_CN/MSTTS_CN.vits.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone/MSTTS_EN/MSTTS_EN.vits.json",1,1 ],
+
+    [ "/data/megastore/SHARE/TTS/VoiceClone/ENTTS_LibriTTS/ENTTS_LibriTTS.vits.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/DongwuZQ/DongwuZQ.vits.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_Musk/ENTTS_Musk.vits.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_Scarlett/ENTTS_Scarlett.vits.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC/ENTTS_VC.vits.json",1,1 ],
+
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC1/ENTTS_VC1.vits.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC2/ENTTS_VC2.vits.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC3/ENTTS_VC3.vits.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC4/ENTTS_VC4.vits.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC5/ENTTS_VC5.vits.json",1,1 ],
+
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC6/ENTTS_VC6.vits.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/Foreign_IP/Foreign_IP.vits.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/GuangdongTiyu/GuangdongTiyu.vits.json",0,1" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn/IP_chn.nomfa.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn2/IP_chn2.nomfa.json",0,1 ],
+
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn3/IP_chn3.nomfa.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn4/IP_chn4.nomfa.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn5/IP_chn5.nomfa.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn6/IP_chn6.nomfa.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn7/IP_chn7.nomfa.json",0,1 ],
+
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_eng/IP_eng.nomfa.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_eng2/IP_eng2.nomfa.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_eng3/IP_eng3.nomfa.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/MengNiu/MengNiu.vits.json",0,1" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/XmovLJ/XmovLJ.vits.json",0,1" ],
+
+    #  中英混
+    ["/data/megastore/SHARE/TTS/VoiceClone3/IP_cnenmix/IP_cnenmix.nomfa.json",0,1 ],
+    # 多情感
+    ["/data/megastore/SHARE/TTS/MultiEmotion/Batch1/Batch1.nomfa.json",0,1 ],
+
+]
+
+
 train_data_indexes: [
-    [0,1,2,3,4,5]
-#    [6,7], [8,9], [10,11],
-#    [12,13], [14,15], [16,17], [18,19],
-#    [20,22], [24,26], [28,30], [32,34]
+    [
+        0,1,
+#        2,3,4,5,6,7,8,9,
+#        10,11,12,13,14,15,16,17,18,19,
+#        20,21,22,23,24,25,26,27,28,29,
+        30,31
+    ]
 ]
 
 train_data_indexes1: [
