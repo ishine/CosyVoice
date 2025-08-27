@@ -759,6 +759,7 @@ class Qwen2LM(TransformerLM):
             max_token_text_ratio: float = 20,
             min_token_text_ratio: float = 2,
             uuid: str = '',
+            emotion_lab=[-1, ],
     ) -> Generator[torch.Tensor, None, None]:
         if isinstance(text, Tuple):
             text, pho = text  # here we only use text, the phoneme is not used
@@ -1897,7 +1898,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
             max_token_text_ratio: float = 20,
             min_token_text_ratio: float = 2,
             uuid: str = "",
-            emotion_lab: list = [-1],
+            emotion_lab: list = [-1, ],
     ) -> Generator[torch.Tensor, None, None]:
         device = embedding.device
 
