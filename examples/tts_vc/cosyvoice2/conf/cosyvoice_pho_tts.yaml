@@ -198,10 +198,12 @@ transcribe: !name:cosyvoice.dataset.processor_kaldidata.transcribe
     get_transcriber: !ref <get_transcriber>
 
 truncate_phoneme_sequence: !name:cosyvoice.dataset.processor_kaldidata.truncate_phoneme_sequence
+get_ref_speech: !name:cosyvoice.dataset.processor_kaldidata.get_ref_speech
 # dataset processor pipeline
 data_pipeline: [
     !ref <filter>,
     !ref <resample>,
+    !ref <get_ref_speech>,
     # !ref <truncate_phoneme_sequence>,
     !ref <tokenize>,
     !ref <tokenize_pho>,    # tokenize_pho 必须在truncate phoneme之后

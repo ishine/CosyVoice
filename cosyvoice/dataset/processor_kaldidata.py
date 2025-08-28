@@ -192,6 +192,20 @@ def resample(data, resample_rate=24000, min_sample_rate=16000, mode='train'):
             sample['speech'] /= max_val
         yield sample
 
+def get_ref_speech(data, mode='train'):
+    for sample in data:
+        assert 'ref_wav' in sample
+        assert 'sample_rate' in sample
+
+        ref_speech, ref_rate = torchaudio.load(sample['ref_wav'])
+        sample['ref_speech'] = ref_speech.mean(dim=0, keepdim=True)
+        if ref_rate != sample['sample_rate']:
+            sample['ref_speech'] = torchaudio.transforms.Resample(
+                orig_freq=ref_rate, new_freq=sample['sample_rate'])(sample['ref_speech'])
+
+        yield sample
+
+
 
 def truncate(data, truncate_length=24576, mode='train'):
     """ Truncate data.
@@ -612,6 +626,12 @@ def padding(data, use_spk_embedding, mode='train', gan=False):
             ori_speech = pad_sequence(ori_speech, batch_first=True, padding_value=0)
             batch['ori_speech'] = ori_speech
             batch['ori_speech_len'] = ori_speech_len
+        if 'ref_speech' in sample[0]:
+            ref_speech = [sample[i]['ref_speech'].squeeze(dim=0) for i in order]
+            ref_speech_len = torch.tensor([i.size(0) for i in ref_speech], dtype=torch.int32)
+            ref_speech = pad_sequence(ref_speech, batch_first=True, padding_value=0)
+            batch['ref_speech'] = ref_speech
+            batch['ref_speech_len'] = ref_speech_len
 
         if 'speech_feat' in sample[0]:
             speech_feat = [sample[i]['speech_feat'] for i in order]

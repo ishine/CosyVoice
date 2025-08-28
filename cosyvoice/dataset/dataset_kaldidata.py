@@ -26,6 +26,15 @@ import torch.distributed as dist
 from torch.utils.data import IterableDataset
 
 
+def utt2spk_to_spk2utt(utt2spk):
+    spk2utt = {}
+    for utt, spk in utt2spk.items():
+        if spk in spk2utt:
+            spk2utt[spk].append(utt)
+        else:
+            spk2utt[spk] = [utt]
+    return spk2utt
+
 class Processor(IterableDataset):
 
     def __init__(self, source, f, *args, **kw):
@@ -117,6 +126,7 @@ class DataList(IterableDataset):
         self.utt2spk = utt2spk
         self.tts_text = tts_text  # a list, each prompt will generate all texts in the list
         self.utt2emo = utt2emo
+        self.spk2utt = utt2spk_to_spk2utt(utt2spk)
         self.sampler = DistributedSampler(shuffle, partition)
 
     def set_epoch(self, epoch):
@@ -141,6 +151,9 @@ class DataList(IterableDataset):
                 sample['emo'] = self.utt2emo[utt]
             else:
                 sample['emo'] = -1  # 没有情绪标签的数据，用-1表示
+
+            ref_utt = random.choice(self.spk2utt[sample['spk']])
+            sample['ref_wav'] = self.utt2wav[ref_utt]  # 参考音频
 
             sample.update(sampler_info)
 
@@ -193,12 +206,15 @@ def Dataset(data_dir,
                # and os.path.exists(f"{data_dir}/text")
                # and os.path.exists(f"{data_dir}/utt2spk")
 
+        data_name = os.path.basename(data_dir)
+
         with open(f"{data_dir}/wav.scp", 'r', encoding='utf-8') as f_scp:
             for line in f_scp:
                 line = line.strip().split(maxsplit=1)
                 if len(line) != 2:
                     continue
                 utt, wav = line[0], line[1]
+                utt = f"{data_name}-{utt}"
                 utt2wav[utt] = wav
 
         if os.path.exists(f"{data_dir}/text_punc"):
@@ -212,6 +228,7 @@ def Dataset(data_dir,
                     if len(line) != 2:
                         continue
                     utt, text = line[0], line[1]
+                    utt = f"{data_name}-{utt}"
                     # 第一步：处理标点**前没有空格**
                     text = re.sub(r'(\S)([.,!?])', r'\1 \2', text)
                     # 第二步：处理标点**后没有空格**
@@ -227,6 +244,8 @@ def Dataset(data_dir,
                     if len(line) != 2:
                         continue
                     utt, spk = line[0], line[1]
+                    utt = f"{data_name}-{utt}"
+                    spk = f"{data_name}-{spk}"
                     utt2spk[utt] = spk
 
         if os.path.exists(f"{data_dir}/utt2emo"):
@@ -236,6 +255,7 @@ def Dataset(data_dir,
                     if len(line) != 2:
                         continue
                     utt, emo = line[0], line[1]
+                    utt = f"{data_name}-{utt}"
                     utt2emo[utt] = int(emo)
 
         logging.info(f"Current utts: {len(utt2wav.keys())}")

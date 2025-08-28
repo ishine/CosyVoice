@@ -497,7 +497,10 @@ def get_codec_and_spkemb(batch_dict, codec_model, spkemb_model, configs):
     batch_dict['speech_token'] = speech_code
     batch_dict['speech_token_len'] = speech_code_len
 
-    if 'ori_speech' in batch_dict:
+    if 'ref_speech' in batch_dict:
+        wave = batch_dict['ref_speech'].to(codec_model.device)
+        wave_len = batch_dict['ref_speech_len'].to(codec_model.device)
+    elif 'ori_speech' in batch_dict:
         wave = batch_dict['ori_speech'].to(codec_model.device)
         wave_len = batch_dict['ori_speech_len'].to(codec_model.device)
     use_offline_spkemb = configs.get('use_offline_spkemb', False)

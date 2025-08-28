@@ -24,6 +24,7 @@ from functools import partial
 import torch
 import torch.distributed as dist
 from torch.utils.data import IterableDataset
+from cosyvoice.dataset.dataset_kaldidata import utt2spk_to_spk2utt
 
 
 class Processor(IterableDataset):
@@ -121,6 +122,7 @@ class DataList(IterableDataset):
         self.tts_text = tts_text  # a list, each prompt will generate all texts in the list
         self.need_text = need_text
         self.utt2emo = utt2emo
+        self.spk2utt = utt2spk_to_spk2utt(utt2spk)
         if not eval:
             self.sampler = DistributedSampler(shuffle, partition)
         else:
@@ -166,6 +168,9 @@ class DataList(IterableDataset):
 
             if self.utt2dur is not None and utt in self.utt2dur:
                 sample['mfa_duration'] = self.utt2dur[utt]
+
+            ref_utt = random.choice(self.spk2utt[sample['spk']])
+            sample['ref_wav'] = self.utt2wav[ref_utt]  # 参考音频
 
             sample.update(sampler_info)
 
