@@ -163,12 +163,17 @@ truncate: !name:cosyvoice.dataset.processor_kaldidata.truncate
 get_transcriber: !name:cosyvoice.dataset.transcriber.get_transcriber
 transcribe: !name:cosyvoice.dataset.processor_kaldidata.transcribe
     get_transcriber: !ref <get_transcriber>
+add_emo_token: !name:cosyvoice.dataset.processor_kaldidata.add_emo_token
+get_ref_speech: !name:cosyvoice.dataset.processor_kaldidata.get_ref_speech
+
 # dataset processor pipeline
 data_pipeline: [
     !ref <mix_text_pinyin>,
+    !ref <add_emo_token>,   # 先在文本上加上emotion_token
     !ref <tokenize>,
     !ref <filter>,
     !ref <resample>,
+    !ref <get_ref_speech>,
     !ref <compute_fbank>,
     !ref <shuffle>,
     !ref <sort>,
@@ -197,7 +202,7 @@ train_conf:
     grad_clip: 5
     accum_grad: 2
     log_interval: 100
-    save_per_step: 10000
+    save_per_step: 5000
 
 # multiple train data dir
 train_data: [
@@ -318,13 +323,59 @@ train_data: [
     [ "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/HighQuality26/HighQuality26" ],
     [ "/mnt/nas/Datasets2/Audio/TTS/VoiceClone2/HighQuality26_en/HighQuality26_en" ],
 
-]
+    # 104
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/DongwuZQ/DongwuZQ" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/DuXY_ManM/DuXY_ManM" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_Musk/ENTTS_Musk" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_Scarlett/ENTTS_Scarlett" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC/ENTTS_VC" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC1/ENTTS_VC1" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC2/ENTTS_VC2" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC3/ENTTS_VC3" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC4/ENTTS_VC4" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC5/ENTTS_VC5" ],
+    #114
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC6/ENTTS_VC6" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/Foreign_IP/Foreign_IP" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/GuangdongTiyu/GuangdongTiyu" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn/IP_chn" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn2/IP_chn2" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn3/IP_chn3" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn4/IP_chn4" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn5/IP_chn5" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn6/IP_chn6" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn7/IP_chn7" ],
+    #124
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_eng/IP_eng" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_eng2/IP_eng2" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_eng3/IP_eng3" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/MengNiu/MengNiu" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/XmovLJ/XmovLJ" ],
 
-train_data_indexes0: [
-    [0,1,2,3,4,5]
+    #  中英混
+    ["/data/megastore/SHARE/TTS/VoiceClone3/IP_cnenmix/IP_cnenmix" ],
+    #  音标
+    ["/data/megastore/SHARE/TTS/VoiceClone3/Celili/Celili" ],
+    # 多情感
+    ["/data/megastore/SHARE/TTS/MultiEmotion/Batch1/Batch1" ],
+    #132
 ]
 
 train_data_indexes: [
+    [
+#     0,1,
+#     2,3,4,5,
+#     104,105,
+#     106,107,108,109,110,
+#     111,112,113,114,115,
+#     116,117,118,119,120,
+#     121,122,123,124,125,
+#     126,127,128,
+     129,130,131,1
+    ]
+]
+
+train_data_indexes1: [
     # [0,1,2,3,4,5],
     [6,7], [8,9], [10,11], [12,13], [14,15],
     [16,17], [18,19], [20,21], [22,23], [24,25],

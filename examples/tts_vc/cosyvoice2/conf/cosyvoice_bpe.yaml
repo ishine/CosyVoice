@@ -165,11 +165,11 @@ transcribe: !name:cosyvoice.dataset.processor_kaldidata.transcribe
     get_transcriber: !ref <get_transcriber>
 add_emo_token: !name:cosyvoice.dataset.processor_kaldidata.add_emo_token
 get_ref_speech: !name:cosyvoice.dataset.processor_kaldidata.get_ref_speech
-# dataset processor pipeline
 
+# dataset processor pipeline
 data_pipeline: [
-    !ref <add_emo_token>,   # 先在文本上加上emotion_token
     !ref <mix_text_pinyin>,
+    !ref <add_emo_token>,   # 先在文本上加上emotion_token
     !ref <tokenize>,
     !ref <filter>,
     !ref <resample>,

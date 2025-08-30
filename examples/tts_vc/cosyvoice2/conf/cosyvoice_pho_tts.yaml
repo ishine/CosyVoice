@@ -49,6 +49,7 @@ llm: !new:cosyvoice.llm.llm.Qwen2LM_Phoneme_Vllm
     use_pause_label: !ref <use_pause_label>
     emotion_num: !ref <emotion_num>
     non_emotional_label: !ref <non_emotional_label>
+    add_emotion_before_llm: True
     text_encoder: !new:cosyvoice.transformer.encoder.ConformerEncoder
         input_size: !ref <text_encoder_input_size>
         output_size: 1024
@@ -467,6 +468,8 @@ train_data: [
 
     #  中英混
     ["/data/megastore/SHARE/TTS/VoiceClone3/IP_cnenmix/IP_cnenmix.nomfa.json",0,1 ],
+    # 音标
+    ["/data/megastore/SHARE/TTS/VoiceClone3/Celili/Celili.nomfa.json",0,1 ],
     # 多情感
     ["/data/megastore/SHARE/TTS/MultiEmotion/Batch1/Batch1.nomfa.json",0,1 ],
 
@@ -479,7 +482,7 @@ train_data_indexes: [
         2,3,4,5,6,7,8,9,
         10,11,12,13,14,15,16,17,18,19,
         20,21,22,23,24,25,26,27,28,29,
-        30,31
+        30,31,32
     ]
 ]
 

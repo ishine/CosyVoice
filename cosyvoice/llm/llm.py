@@ -1644,6 +1644,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
             },
             emotion_num: int = 0,
             non_emotional_label: int = -1,  # 非多情感数据标签
+            add_emotion_before_llm: bool = False,  # 输入llm前是否加上情绪向量
     ):
         super().__init__()
         self.llm_input_size = llm_input_size
@@ -1662,11 +1663,14 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
         self.use_pause_label = use_pause_label
         self.emotion_num = emotion_num
         self.non_emotional_label = non_emotional_label
+        self.add_emotion_before_llm = add_emotion_before_llm
         logger.info(
             f"llm use prosody: {use_frontend_prsd}, use pause label: {use_pause_label}, "
-            f"emotion_num: {emotion_num}, non_emotional_label: {non_emotional_label}")
+            f"emotion_num: {emotion_num}, non_emotional_label: {non_emotional_label}, add_emotion_before_llm: {add_emotion_before_llm}")
         if self.emotion_num > 0:  # emotion_embedding直接放到pho encoder前加入
             self.emotion_embedding = torch.nn.Embedding(self.emotion_num, text_encoder_input_size)
+        if self.add_emotion_before_llm:
+            self.emotion_affine_layer = nn.Linear(text_encoder_input_size, llm_input_size)
         self.vllm_sample_params = vllm_sample_params
         logger.info(f"vllm sampling params: {vllm_sample_params}")
 
@@ -1807,7 +1811,10 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
         emotion_lab = batch['emos']
 
         # 0. prepare llm_target
-        extra_token_num = 2
+        if self.add_emotion_before_llm:
+            extra_token_num = 4   # 包含情绪token
+        else:
+            extra_token_num = 2   # spk_embeding, task_id
         lm_target = [torch.tensor(
             [IGNORE_ID] * (extra_token_num + pho_token_len[i]) +
               speech_token[i,:speech_token_len[i]].tolist() +
@@ -1836,7 +1843,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
                     emotion_emb_list.append(
                         self.emotion_embedding.weight[lab].reshape(1, 1, -1))
             emotion_emb = torch.cat(emotion_emb_list, dim=0)  # B 1 D
-            pho_token += emotion_emb  # B L D
+            # pho_token += emotion_emb  # B L D
 
         pho_token, pho_token_len = self.encode(pho_token, pho_token_len)
 
@@ -1846,6 +1853,12 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
         for src_attention in self.src_attention:
             pho_token, pho_mask, text_token, text_mask = src_attention(
                 pho_token, pho_mask, text_token, text_mask)
+
+        if self.emotion_num > 0 and self.add_emotion_before_llm:
+            emotion_token = self.emotion_affine_layer(emotion_emb)  # B 1 D1
+            # pho_token += emotion_token
+            pho_token = torch.cat([emotion_token, pho_token, emotion_token], dim=1)
+            pho_token_len += 2
 
         # 2. embedding projection
         embedding = F.normalize(embedding, dim=1)
@@ -1933,7 +1946,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
                     emotion_emb_list.append(
                         self.emotion_embedding.weight[lab].reshape(1, 1, -1))
             emotion_emb = torch.cat(emotion_emb_list, dim=0)  # B 1 D
-            pho += emotion_emb
+            # pho += emotion_emb
 
         # 1. encode text
         pho, pho_len = self.encode(pho, pho_len)
@@ -1946,6 +1959,10 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
         for src_attention in self.src_attention:
             pho, pho_mask, text, text_mask = src_attention(pho, pho_mask, text,
                                                            text_mask)
+        if self.emotion_num > 0 and self.add_emotion_before_llm:
+            emotion_token = self.emotion_affine_layer(emotion_emb)  # B 1 D
+            # pho += emotion_token
+            pho = torch.cat([emotion_token, pho, emotion_token], dim=1)  # BLD
 
         # 2. encode embedding
         if embedding.shape[0] != 0:
