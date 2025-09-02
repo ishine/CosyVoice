@@ -204,7 +204,7 @@ get_ref_speech: !name:cosyvoice.dataset.processor_kaldidata.get_ref_speech
 data_pipeline: [
     !ref <filter>,
     !ref <resample>,
-    !ref <get_ref_speech>,
+    # !ref <get_ref_speech>,
     # !ref <truncate_phoneme_sequence>,
     !ref <tokenize>,
     !ref <tokenize_pho>,    # tokenize_pho 必须在truncate phoneme之后

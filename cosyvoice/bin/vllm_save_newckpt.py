@@ -2,6 +2,7 @@ import torch
 import os
 from hyperpyyaml import load_hyperpyyaml
 
+
 def export_cosyvoice2_vllm(model, model_path, device):
     if os.path.exists(model_path):
         return
@@ -44,6 +45,23 @@ def export_cosyvoice2_vllm(model, model_path, device):
     model.llm.model.set_input_embeddings(embed_tokens)  # 恢复原来的文本embed
 
 
+def visualize_embedding(VC_model):
+    import matplotlib.pyplot as plt
+    from sklearn.manifold import TSNE
+
+    tsne = TSNE(n_components=2, perplexity=3, random_state=42)
+    emb = VC_model.emotion_embedding.weight
+    labels = [f"class {i}" for i in range(emb.size(0))]
+    emb_tsne = tsne.fit_transform(emb.detach().cpu().numpy())
+    plt.figure(figsize=(6, 6))
+    for i, (x, y) in enumerate(emb_tsne):
+        plt.scatter(x, y, label=labels[i], s=100)
+        plt.text(x + 0.02, y + 0.02, labels[i], fontsize=10)
+    plt.title("Embedding Visualization (t-SNE)")
+    plt.legend()
+    plt.show()
+
+
 if __name__ == "__main__":
     pretrain_path = "/data/megastore/SHARE/TTS/LAM_TTS/latest/checkpoints/acoustics/qwen/CosyVoice-BlankEN"
     vc_model_path = "/data/megastore/SHARE/TTS/LAM_TTS/latest/checkpoints/LAM-VC/LLM/llm_v2.pt"
@@ -62,5 +80,6 @@ if __name__ == "__main__":
 
     VC_model = vc_configs['llm']
     VC_model.load_state_dict(state_dict, strict=True)
-
+    # if hasattr(VC_model, 'emotion_embedding'):
+    #     visualize_embedding(VC_model)
     export_cosyvoice2_vllm(VC_model, save_root, 'cpu')

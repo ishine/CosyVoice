@@ -49,6 +49,7 @@ llm: !new:cosyvoice.llm.llm.Qwen2LM_Phoneme_Vllm
     use_pause_label: !ref <use_pause_label>
     emotion_num: !ref <emotion_num>
     non_emotional_label: !ref <non_emotional_label>
+    add_emotion_before_llm: True
     text_encoder: !new:cosyvoice.transformer.encoder.ConformerEncoder
         input_size: !ref <text_encoder_input_size>
         output_size: 1024
@@ -203,7 +204,7 @@ get_ref_speech: !name:cosyvoice.dataset.processor_kaldidata.get_ref_speech
 data_pipeline: [
     !ref <filter>,
     !ref <resample>,
-    !ref <get_ref_speech>,
+    # !ref <get_ref_speech>,
     # !ref <truncate_phoneme_sequence>,
     !ref <tokenize>,
     !ref <tokenize_pho>,    # tokenize_pho 必须在truncate phoneme之后
@@ -481,7 +482,7 @@ train_data_indexes: [
 #        2,3,4,5,6,7,8,9,
 #        10,11,12,13,14,15,16,17,18,19,
 #        20,21,22,23,24,25,26,27,28,29,
-         30,31,32,1
+         30,31,32,0
     ]
 ]
 

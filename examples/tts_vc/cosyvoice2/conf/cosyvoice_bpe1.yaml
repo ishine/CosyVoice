@@ -35,6 +35,7 @@ llm: !new:cosyvoice.llm.llm.Qwen2LM
     mix_ratio: [5, 15]
     use_embedding: !ref <use_embedding>
     spk_embed_dim: !ref <spk_embed_dim>
+    emotion_num: 5
     llm: !new:cosyvoice.llm.llm.Qwen2Encoder
         pretrain_path: !ref <qwen_pretrain_path>
     sampling: !name:cosyvoice.utils.common.non_random_ras_sampling

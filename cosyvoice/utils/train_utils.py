@@ -330,7 +330,7 @@ def log_per_step(writer, info_dict):
             for k in ['epoch', 'lr', 'grad_norm']:
                 writer.add_scalar('{}/{}'.format(tag, k), info_dict[k], step + 1)
             for k, v in loss_dict.items():
-                writer.add_scalar('{}/{}'.format(tag, k), v, step + 1)
+                writer.add_scalar('{}/{}'.format(tag, k), v.to(torch.float32), step + 1)
 
     # TRAIN & CV, Shell log (stdout)
     if (info_dict['batch_idx'] + 1) % info_dict['log_interval'] == 0:
