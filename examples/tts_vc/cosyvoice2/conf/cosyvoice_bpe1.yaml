@@ -333,13 +333,11 @@ train_data: [
     [ "/data/megastore/SHARE/TTS/VoiceClone/MSTTS_EN/MSTTS_EN" ],
     [ "/data/megastore/SHARE/TTS/VoiceClone/MSTTS_CN/MSTTS_CN" ],
     [ "/data/megastore/SHARE/TTS/VoiceClone/ENTTS_LibriTTS/ENTTS_LibriTTS" ],
-
     [ "/data/megastore/SHARE/TTS/VoiceClone3/DongwuZQ/DongwuZQ" ],
-    [ "/data/megastore/SHARE/TTS/VoiceClone3/DuXY_ManM/DuXY_ManM" ],
     [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_Musk/ENTTS_Musk" ],
     [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_Scarlett/ENTTS_Scarlett" ],
-    # 10
     [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC/ENTTS_VC" ],
+    # 10
     [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC1/ENTTS_VC1" ],
     [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC2/ENTTS_VC2" ],
     [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC3/ENTTS_VC3" ],

@@ -17,7 +17,7 @@ qwen_pretrain_path: "../../../pretrained_models/CosyVoice2-0.5B/CosyVoice-BlankE
 # second of min length, if the duration of a audio is less than this, it will be duplicated.
 # for speaker audio crop, 0 means do not crop
 spk_audio_crop: 10
-rich_sample_short_utt: 10
+rich_sample_short_utt: 2
 
 s3tokenizer_ckpt: "../../../pretrained_models/s3tokenizer"
 speaker_encoder_ckpt: "../../../pretrained_models/speaker_encoder_v2.pt"
@@ -450,7 +450,7 @@ train_data: [
 
     [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC6/ENTTS_VC6.vits.json",1,1 ],
     [ "/data/megastore/SHARE/TTS/VoiceClone3/Foreign_IP/Foreign_IP.vits.json",1,1 ],
-    [ "/data/megastore/SHARE/TTS/VoiceClone3/GuangdongTiyu/GuangdongTiyu.vits.json",0,1" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/GuangdongTiyu/GuangdongTiyu.vits.json",0,1 ],
     [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn/IP_chn.nomfa.json",0,1 ],
     [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_chn2/IP_chn2.nomfa.json",0,1 ],
 
@@ -463,18 +463,18 @@ train_data: [
     [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_eng/IP_eng.nomfa.json",1,1 ],
     [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_eng2/IP_eng2.nomfa.json",1,1 ],
     [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_eng3/IP_eng3.nomfa.json",1,1 ],
-    [ "/data/megastore/SHARE/TTS/VoiceClone3/MengNiu/MengNiu.vits.json",0,1" ],
-    [ "/data/megastore/SHARE/TTS/VoiceClone3/XmovLJ/XmovLJ.vits.json",0,1" ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/MengNiu/MengNiu.vits.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/XmovLJ/XmovLJ.vits.json",0,1 ],
 
 
   #  中英混
     [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_cnenmix/IP_cnenmix.nomfa.json",0,1 ],
     [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_cnenmix2/IP_cnenmix2.nomfa.json",0,1 ],
   # 音标
-    [ "/data/megastore/SHARE/TTS/VoiceClone3/Celili/Celili.nomfa.json",0,1 ],
-    [ "/data/megastore/SHARE/TTS/VoiceClone/CNENTTS/CNENTTS.nomfa.json",1,1 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone3/Celili/Celili.nomfa.json", 0, 100 ],
+    [ "/data/megastore/SHARE/TTS/VoiceClone/CNENTTS/CNENTTS.nomfa.json", 1, 100 ],
   # 多情感
-    [ "/data/megastore/SHARE/TTS/MultiEmotion/Batch1/Batch1.nomfa.json",0,1 ],
+    [ "/data/megastore/SHARE/TTS/MultiEmotion/Batch1/Batch1.nomfa.json", 0, 30 ],
 
 ]
 

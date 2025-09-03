@@ -142,6 +142,9 @@ class DataList(IterableDataset):
             sample['wav'] = self.utt2wav[utt]
             if utt in self.utt2text:
                 sample['text'] = self.utt2text[utt]
+            else:
+                continue
+
             if utt in self.utt2spk:
                 sample['spk'] = self.utt2spk[utt]
             else:
@@ -197,11 +200,15 @@ def Dataset(data_dir,
     utt2text = {}
     utt2spk = {}
     utt2emo = {}
+    valid_utt_list = []
 
     def add_one_data(data_dir):
+        data_repeat_time = 1
         if isinstance(data_dir, list):
+            if len(data_dir) > 1:
+                data_repeat_time = int(data_dir[1])
             data_dir = data_dir[0]
-        logging.info(f"Loading data: {data_dir}")
+        logging.info(f"Loading data: {data_dir}, repeat times {data_repeat_time}")
         assert os.path.exists(f"{data_dir}/wav.scp") # \
                # and os.path.exists(f"{data_dir}/text")
                # and os.path.exists(f"{data_dir}/utt2spk")
@@ -216,6 +223,8 @@ def Dataset(data_dir,
                 utt, wav = line[0], line[1]
                 utt = f"{data_name}-{utt}"
                 utt2wav[utt] = wav
+
+                valid_utt_list.extend([utt] * data_repeat_time)
 
         if os.path.exists(f"{data_dir}/text_punc"):
             text_path = f"{data_dir}/text_punc"
@@ -258,7 +267,7 @@ def Dataset(data_dir,
                     utt = f"{data_name}-{utt}"
                     utt2emo[utt] = int(emo)
 
-        logging.info(f"Current utts: {len(utt2wav.keys())}")
+        logging.info(f"Current utts: {len(utt2wav.keys())}, current data list: {len(valid_utt_list)}")
 
     if isinstance(data_dir, list):
         for sub_data in data_dir:
@@ -266,10 +275,10 @@ def Dataset(data_dir,
     else:
         add_one_data(data_dir)
 
-    valid_utt_list = list(utt2wav.keys())
-    if len(utt2text) != 0 and mode=='train':
-        valid_utt_list = list(set(utt2wav.keys()) & set(utt2text.keys()))
-    logging.info(f"Total utts: {len(valid_utt_list)}")
+    # valid_utt_list = list(utt2wav.keys())
+    # if len(utt2text) != 0 and mode=='train':
+    #     valid_utt_list = list(set(utt2wav.keys()) & set(utt2text.keys()))
+    logging.info(f"Total data: {len(valid_utt_list)}")
 
     tts_text = None
     if mode=="inference" and os.path.exists(tts_file):

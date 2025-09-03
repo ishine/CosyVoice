@@ -333,13 +333,11 @@ train_data: [
     [ "/data/megastore/SHARE/TTS/VoiceClone/MSTTS_EN/MSTTS_EN" ],
     [ "/data/megastore/SHARE/TTS/VoiceClone/MSTTS_CN/MSTTS_CN" ],
     [ "/data/megastore/SHARE/TTS/VoiceClone/ENTTS_LibriTTS/ENTTS_LibriTTS" ],
-
     [ "/data/megastore/SHARE/TTS/VoiceClone3/DongwuZQ/DongwuZQ" ],
-    [ "/data/megastore/SHARE/TTS/VoiceClone3/DuXY_ManM/DuXY_ManM" ],
     [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_Musk/ENTTS_Musk" ],
     [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_Scarlett/ENTTS_Scarlett" ],
-    # 10
     [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC/ENTTS_VC" ],
+    # 10
     [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC1/ENTTS_VC1" ],
     [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC2/ENTTS_VC2" ],
     [ "/data/megastore/SHARE/TTS/VoiceClone3/ENTTS_VC3/ENTTS_VC3" ],
@@ -361,15 +359,14 @@ train_data: [
     [ "/data/megastore/SHARE/TTS/VoiceClone3/IP_eng3/IP_eng3" ],
     [ "/data/megastore/SHARE/TTS/VoiceClone3/MengNiu/MengNiu" ],
     [ "/data/megastore/SHARE/TTS/VoiceClone3/XmovLJ/XmovLJ" ],
-
-    # 30 中英混
+    # 30   # 中英混
     ["/data/megastore/SHARE/TTS/VoiceClone3/IP_cnenmix/IP_cnenmix" ],
     ["/data/megastore/SHARE/TTS/VoiceClone3/IP_cnenmix2/IP_cnenmix2" ],
     #  音标
-    ["/data/megastore/SHARE/TTS/VoiceClone3/Celili/Celili" ],
-    ["/data/megastore/SHARE/TTS/VoiceClone/CNENTTS/CNENTTS" ],
+    ["/data/megastore/SHARE/TTS/VoiceClone3/Celili/Celili", 100 ],
+    ["/data/megastore/SHARE/TTS/VoiceClone/CNENTTS/CNENTTS", 100 ],
     # 多情感
-    ["/data/megastore/SHARE/TTS/MultiEmotion/Batch1/Batch1" ],
+    ["/data/megastore/SHARE/TTS/MultiEmotion/Batch1/Batch1", 30 ],
 
 ]
 

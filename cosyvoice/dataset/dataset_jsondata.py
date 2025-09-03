@@ -248,10 +248,12 @@ def Dataset(json_file,
     valid_utt_list = []
 
     def add_one_data(json_file):
-        logging.info(f"Loading data: {json_file}, short data sample times {rich_sample_short_utt}")
         duplicated_utt = 0
+        repeat_time = 1
         if isinstance(json_file, list):
             json_file, language, repeat_time = json_file
+            repeat_time = int(repeat_time)
+        logging.info(f"Loading data: {json_file}, repeat times {repeat_time}, short data times {rich_sample_short_utt}")
         with open(json_file, 'r', encoding='utf8') as fin:
             dataset_info = json.load(fin)
         data_dir = os.path.dirname(json_file)
@@ -291,7 +293,8 @@ def Dataset(json_file,
                     # assert len(pho) == len(duration)
                     utt2dur[utt] = duration
 
-                valid_utt_list.append(utt)
+                valid_utt_list.extend([utt] * repeat_time)  # 每个数据集有一个重复次数，对有些标签比较少的数据，可以多采样
+
                 if rich_sample_short_utt>0 and len(pho) < 20:  # 对音素序列长度低于20的音频富采样
                     valid_utt_list.extend([utt]*rich_sample_short_utt)
 
