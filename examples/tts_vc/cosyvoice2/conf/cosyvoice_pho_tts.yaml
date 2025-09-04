@@ -23,7 +23,7 @@ s3tokenizer_ckpt: "../../../pretrained_models/s3tokenizer"
 speaker_encoder_ckpt: "../../../pretrained_models/speaker_encoder_v2.pt"
 use_pause_label: True  # whether use human labeled or MFA aligned pause labels
 emotion_num: 5      # types of emotion
-non_emotional_label: 0  # 非多情感数据，标签可选0,-1, 若为-1，对应embedding为全零向量
+non_emotional_label: -1  # 非多情感数据，标签可选0,-1, 若为-1，对应emotion为全零向量
 
 # model params
 # for all class/function included in this repo, we use !<name> or !<new> for intialization, so that user may find all corresponding class/function according to one single yaml.

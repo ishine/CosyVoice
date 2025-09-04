@@ -559,13 +559,15 @@ class Qwen2LM(TransformerLM):
             qwen_sglang_config: dict = None,  # sglang/vllm加速配置
             vllm_sample_params: dict = None,  # vllm采样参数配置
             emotion_num: int = 0,
+            non_emotional_label: int = -1,  # 非多情感数据标签
     ):
         torch.nn.Module.__init__(self)
         self.use_frontend_prsd = False
         self.use_pause_label = False
         self.use_embedding = use_embedding
         self.emotion_num = emotion_num
-        logger.info(f"use_embedding: {use_embedding}, emotion_num: {emotion_num}")
+        self.non_emotional_label = non_emotional_label
+        logger.info(f"use_embedding: {use_embedding}, emotion_num: {emotion_num}, non_emotional_label: {non_emotional_label}")
         if self.emotion_num > 0:
             self.spk_adapter = SpeakerAdapter(dim=llm_input_size, bottleneck=256)
             num_emotions = max(1, self.emotion_num)  # 避免为0
@@ -717,19 +719,23 @@ class Qwen2LM(TransformerLM):
             embedding = F.normalize(embedding, dim=1)
             embedding = self.spk_embed_affine_layer(embedding)
             if batch.get('emos', None) is not None and self.emotion_num > 0:
-                emotion_lab = [i if i!=-1 else 0 for i in batch['emos']]  # 把-1当做0
+                if self.non_emotional_label == 0:
+                    emotion_lab = [i if i != -1 else 0 for i in batch['emos']]  # 把-1当做0
+                else:
+                    emotion_lab = batch['emos']
                 emotion_lab_tensor = torch.tensor(emotion_lab, dtype=torch.long, device=device)
 
                 s_orig = embedding.detach()
-                s_hat = self.spk_adapter(embedding)
+                s_hat = embedding.clone()
                 # ---------- adversarial loss: only on labeled samples ----------
                 labeled_mask = (emotion_lab_tensor >= 0)  # (B,)
                 if labeled_mask.any():
-                    emo_labels_labeled = emotion_lab_tensor[labeled_mask]  # (B_lab,)
+                    s_hat[labeled_mask] = self.spk_adapter(s_hat[labeled_mask])
                     s_out_labeled = s_hat[labeled_mask]  # (B_lab, D)
                     # apply GRL before classifier
                     s_adv = grad_reverse(s_out_labeled, self.grl_lambda)
                     pred = self.emo_adversary(s_adv)  # (B_lab, num_emotions)
+                    emo_labels_labeled = emotion_lab_tensor[labeled_mask]  # (B_lab,)
                     adv_loss = F.cross_entropy(pred, emo_labels_labeled)
                 else:
                     adv_loss = torch.tensor(0.0, device=device)
@@ -836,19 +842,25 @@ class Qwen2LM(TransformerLM):
             prompt_text, prompt_pho = prompt_text
             prompt_text_len, prompt_pho_len = prompt_text_len
 
+        device = text.device
+        emotion_lab_tensor = torch.tensor(emotion_lab, dtype=torch.long, device=device)
+        if self.non_emotional_label == 0:
+            emotion_lab_tensor[emotion_lab_tensor < 0] = 0
+
         if self.use_embedding:
             embedding = embedding
             embedding = F.normalize(embedding, dim=1)
             embedding = self.spk_embed_affine_layer(embedding)
-            if self.emotion_num > 0:
-                s_hat = self.spk_adapter(embedding)
+            labeled_mask = (emotion_lab_tensor >= 0)
+            if self.emotion_num > 0 and labeled_mask.any():
+                s_hat = embedding.clone()
+                s_hat[labeled_mask] = self.spk_adapter(s_hat[labeled_mask])
                 embedding = s_hat.unsqueeze(1)  # (B,1,D)
             else:
                 embedding = embedding.unsqueeze(1)
         else:
             embedding = None
 
-        device = text.device
         text = torch.concat([prompt_text, text], dim=1)
         text_len += prompt_text_len
         text = self.llm.model.model.embed_tokens(text)
@@ -1718,6 +1730,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
             emotion_num: int = 0,
             non_emotional_label: int = -1,  # 非多情感数据标签
             add_emotion_before_llm: bool = False,  # 输入llm前是否加上情绪向量
+            emotion_fuse_type: str = 'add',  # add OR cat
     ):
         super().__init__()
         self.llm_input_size = llm_input_size
@@ -1737,9 +1750,11 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
         self.emotion_num = emotion_num
         self.non_emotional_label = non_emotional_label
         self.add_emotion_before_llm = add_emotion_before_llm
+        self.emotion_fuse_type = emotion_fuse_type
         logger.info(
             f"llm use prosody: {use_frontend_prsd}, use pause label: {use_pause_label}, "
-            f"emotion_num: {emotion_num}, non_emotional_label: {non_emotional_label}, add_emotion_before_llm: {add_emotion_before_llm}")
+            f"emotion_num: {emotion_num}, non_emotional_label: {non_emotional_label}, "
+            f"add_emotion_before_llm: {add_emotion_before_llm}, emotion_fuse_type: {emotion_fuse_type}")
         if self.emotion_num > 0:  # emotion_embedding直接放到pho encoder前加入
             self.emotion_embedding = torch.nn.Embedding(self.emotion_num, text_encoder_input_size)
             self.spk_adapter = SpeakerAdapter(dim=llm_input_size,
@@ -1755,7 +1770,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
         self.grl_lambda = 1.0  # GRL 系数
 
         if self.add_emotion_before_llm:
-            self.emotion_affine_layer = nn.Linear(text_encoder_input_size, llm_input_size)
+            self.emotion_affine_layer = nn.Linear(text_encoder_input_size, llm_input_size, bias=False)
 
         self.vllm_sample_params = vllm_sample_params
         logger.info(f"vllm sampling params: {vllm_sample_params}")
@@ -1898,7 +1913,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
         emotion_lab_tensor = torch.tensor(batch['emos'], dtype=torch.long, device=device)
 
         # 0. prepare llm_target
-        if self.add_emotion_before_llm:
+        if self.add_emotion_before_llm and self.emotion_fuse_type == 'cat':
             extra_token_num = 4   # 包含情绪token
         else:
             extra_token_num = 2   # spk_embeding, task_id
@@ -1931,7 +1946,8 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
                     emotion_emb_list.append(
                         self.emotion_embedding(torch.LongTensor([lab]).to(device)).reshape(1, 1, -1))
             emotion_emb = torch.cat(emotion_emb_list, dim=0)  # B 1 D1
-            # pho_token += emotion_emb  # B L D
+            if self.emotion_fuse_type == 'add':
+                pho_token += emotion_emb  # B L D
 
         pho_token, pho_token_len = self.encode(pho_token, pho_token_len)
 
@@ -1948,22 +1964,27 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
 
         if self.emotion_num > 0 and self.add_emotion_before_llm:
             emotion_token = self.emotion_affine_layer(emotion_emb)  # B 1 D
-            # pho_token += emotion_token
-            pho_token = torch.cat([emotion_token, pho_token, emotion_token], dim=1)
-            pho_token_len += 2
+            if self.emotion_fuse_type == 'add':
+                pho_token += emotion_token
+            else:
+                pho_token = torch.cat([emotion_token, pho_token, emotion_token], dim=1)
+                pho_token_len += 2
 
             s = embedding  # (B, D)
             s_orig = s.detach()  # detach original as reference (no grad needed)
-            s_hat = self.spk_adapter(s)
+            s_hat = s.clone()
 
             # ---------- adversarial loss: only on labeled samples ----------
             labeled_mask = (emotion_lab_tensor >= 0)  # (B,)
             if labeled_mask.any():
-                emo_labels_labeled = emotion_lab_tensor[labeled_mask]  # (B_lab,)
+                # only update the embedding with emotion label
+                s_hat[labeled_mask] = self.spk_adapter(s[labeled_mask])  # (B_lab, D)
                 s_out_labeled = s_hat[labeled_mask]  # (B_lab, D)
                 # apply GRL before classifier
                 s_adv = grad_reverse(s_out_labeled, self.grl_lambda)
                 pred = self.emo_adversary(s_adv)  # (B_lab, num_emotions)
+
+                emo_labels_labeled = emotion_lab_tensor[labeled_mask]  # (B_lab,)
                 adv_loss = F.cross_entropy(pred, emo_labels_labeled)
             else:
                 adv_loss = torch.tensor(0.0, device=device)
@@ -2037,6 +2058,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
             emotion_lab: list = [-1, ],
     ) -> Generator[torch.Tensor, None, None]:
         device = embedding.device
+        emotion_lab_tensor = torch.tensor(emotion_lab, dtype=torch.long, device=device)
 
         text, pho = text
         text_len, pho_len = text_len
@@ -2062,6 +2084,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
             for idx, lab in enumerate(emotion_lab):
                 if self.non_emotional_label == 0 and lab == -1:
                     lab = 0  # 将没有情绪标签的数据，也定义为中性
+                    emotion_lab_tensor[idx] = 0
                 if lab < 0:
                     emotion_emb_list.append(
                         torch.zeros(self.text_encoder_input_size).reshape(1, 1, -1).to(device))
@@ -2070,7 +2093,8 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
                         self.emotion_embedding(torch.LongTensor([lab]).to(device)).reshape(1, 1, -1))
 
             emotion_emb = torch.cat(emotion_emb_list, dim=0)  # B 1 D
-            # pho += emotion_emb
+            if self.emotion_fuse_type == 'add':
+                pho += emotion_emb
 
         # 1. encode text
         pho, pho_len = self.encode(pho, pho_len)
@@ -2085,15 +2109,19 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
                                                            text_mask)
         if self.emotion_num > 0 and self.add_emotion_before_llm:
             emotion_token = self.emotion_affine_layer(emotion_emb)  # B 1 D
-            # pho += emotion_token
-            pho = torch.cat([emotion_token, pho, emotion_token], dim=1)  # BLD
+            if self.emotion_fuse_type == 'add':
+                pho += emotion_token
+            else:
+                pho = torch.cat([emotion_token, pho, emotion_token], dim=1)  # BLD
 
         # 2. encode embedding
         if embedding.shape[0] != 0:
             embedding = F.normalize(embedding, dim=1)
             embedding = self.spk_embed_affine_layer(embedding)
-            if self.emotion_num > 0:
-                s_hat = self.spk_adapter(embedding)
+            labeled_mask = (emotion_lab_tensor >= 0)  # (B,)
+            if self.emotion_num > 0 and labeled_mask.any():  # 只有非-1的emotion才会修改说话人向量
+                s_hat = embedding.clone()
+                s_hat[labeled_mask] = self.spk_adapter(s_hat[labeled_mask])
                 embedding = s_hat.unsqueeze(1)  # (B,1,D)
             else:
                 embedding = embedding.unsqueeze(1)
