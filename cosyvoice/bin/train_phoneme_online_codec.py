@@ -117,73 +117,87 @@ def main():
     # load checkpoint
     model = configs[args.model]
 
-    # add additional LoRA parameters
     use_lora = configs.get("use_lora", False)
-    if use_lora:
-        model = lora.replace_specific_layer_4lora(model, configs)
-        lora.mark_only_lora_as_trainable(model)
-    lora.getModelSize_lora(model)
 
     start_epoch = 0
     resume_info = None
-    if args.checkpoint is not None:
-        if os.path.exists(args.checkpoint):
-            if os.path.isdir(args.checkpoint):  # the ckpt path is a dir, we will use the most recent ckpt file
-                ckpt_path = get_latest_ckpt(args.checkpoint)
-                args.checkpoint = ckpt_path
-                yaml_path = ckpt_path.replace(".pt", ".yaml")
-                if os.path.exists(yaml_path):
-                    resume_info = get_resume_params(yaml_path)
-                    logging.info(resume_info)
+    def warmup_model():
+        if args.checkpoint is not None:
+            if os.path.exists(args.checkpoint):
+                if os.path.isdir(args.checkpoint):  # the ckpt path is a dir, we will use the most recent ckpt file
+                    ckpt_path = get_latest_ckpt(args.checkpoint)
+                    args.checkpoint = ckpt_path
+                    yaml_path = ckpt_path.replace(".pt", ".yaml")
+                    if os.path.exists(yaml_path):
+                        resume_info = get_resume_params(yaml_path)
+                        logging.info(resume_info)
 
-            saved_state_dict = torch.load(args.checkpoint, map_location='cpu')
-            if 'generator' in saved_state_dict:
-                logging.info('use pretrained generator.')
-                saved_state_dict = saved_state_dict['generator']
+                saved_state_dict = torch.load(args.checkpoint, map_location='cpu')
+                if 'generator' in saved_state_dict:
+                    logging.info('use pretrained generator.')
+                    saved_state_dict = saved_state_dict['generator']
 
-            new_state_dict = {}
-            dest_model = model
-            if gan:
-                has_disc = False
-                for key in saved_state_dict:
-                    if key.startswith('discriminator'):
-                        has_disc = True
-                        break
-                if not has_disc:
-                    # 模型参数只保存了generator
-                    dest_model = model.generator
-                    logging.warning('discriminator is not pretrained!')
+                new_state_dict = {}
+                dest_model = model
+                if gan:
+                    has_disc = False
+                    for key in saved_state_dict:
+                        if key.startswith('discriminator'):
+                            has_disc = True
+                            break
+                    if not has_disc:
+                        # 模型参数只保存了generator
+                        dest_model = model.generator
+                        logging.warning('discriminator is not pretrained!')
 
-            for k, v in dest_model.state_dict().items():
-                if k not in saved_state_dict:
-                    logging.warning(
-                        f"{k} is not saved in the checkpoint {args.checkpoint}")
-                    new_state_dict[k] = v
-                elif v.size() != saved_state_dict[k].size():
-                    logging.warning(
-                        f"**{k} size is not same in the checkpoint:"
-                        f" cur size={v.size()}, "
-                        f" saved size={saved_state_dict[k].size()}")
-                    # 专门处理 embedding 扩展的情况
-                    if "embedding" in k and v.size(0) > saved_state_dict[
-                        k].size(0) and v.size(1) == saved_state_dict[k].size(1):
-                        # 先拷贝已有的 140 个
-                        new_weight = v.clone()
-                        new_weight[:saved_state_dict[k].size(0)] = \
-                        saved_state_dict[k]
-                        # 其余的（比如最后一个）保持 v（dest_model 初始化的随机权重）
-                        new_state_dict[k] = new_weight
-                    else:
-                        # 其他情况保持原来的
+                for k, v in dest_model.state_dict().items():
+                    if k not in saved_state_dict:
+                        logging.warning(
+                            f"{k} is not saved in the checkpoint {args.checkpoint}")
                         new_state_dict[k] = v
-                else:
-                    new_state_dict[k] = saved_state_dict[k]
+                    elif v.size() != saved_state_dict[k].size():
+                        logging.warning(
+                            f"**{k} size is not same in the checkpoint:"
+                            f" cur size={v.size()}, "
+                            f" saved size={saved_state_dict[k].size()}")
+                        # 专门处理 embedding 扩展的情况
+                        if "embedding" in k and v.size(0) > saved_state_dict[
+                            k].size(0) and v.size(1) == saved_state_dict[k].size(1):
+                            # 先拷贝已有的 140 个
+                            new_weight = v.clone()
+                            new_weight[:saved_state_dict[k].size(0)] = \
+                            saved_state_dict[k]
+                            # 其余的（比如最后一个）保持 v（dest_model 初始化的随机权重）
+                            new_state_dict[k] = new_weight
+                        else:
+                            # 其他情况保持原来的
+                            new_state_dict[k] = v
+                    else:
+                        new_state_dict[k] = saved_state_dict[k]
 
-            dest_model.load_state_dict(new_state_dict, strict=False)
-            logging.info(f'Loaded checkpoint {args.checkpoint}')
-        else:
-            logging.warning('checkpoint {} do not exsist!'.format(args.checkpoint))
+                dest_model.load_state_dict(new_state_dict, strict=False)
+                logging.info(f'Loaded checkpoint {args.checkpoint}')
+            else:
+                logging.warning('checkpoint {} do not exsist!'.format(args.checkpoint))
 
+    warmup_model()
+    # add additional LoRA parameters  先加载预训练模型的参数，之后再添加LoRA
+    if use_lora:
+        # model = lora.replace_specific_layer_4lora(model, configs)
+        # lora.mark_only_lora_as_trainable(model)
+        # lora.getModelSize_lora(model)
+        from peft import LoraConfig, get_peft_model
+
+        peft_config = LoraConfig(
+            r=configs['lora_r'], lora_alpha=configs['lora_alpha'],
+            target_modules=configs['lora_target_modules'],
+            modules_to_save=configs['modules_to_save']
+        )
+        model = get_peft_model(model, peft_config)
+        model.print_trainable_parameters()
+        model.save_pretrained(configs['train_conf']['model_dir'])
+
+    warmup_model()
     # Dispatch model from cpu to gpu
     model = wrap_cuda_model(args, model)
     rank = int(os.environ["LOCAL_RANK"])

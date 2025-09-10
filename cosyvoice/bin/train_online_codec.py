@@ -117,46 +117,66 @@ def main():
     model = configs[args.model]
     start_epoch = 0
     resume_info = None
-    if args.checkpoint is not None:
-        if os.path.exists(args.checkpoint):
-            if os.path.isdir(args.checkpoint):  # the ckpt path is a dir, we will use the most recent ckpt file
-                ckpt_path = get_latest_ckpt(args.checkpoint)
-                args.checkpoint = ckpt_path
-                yaml_path = ckpt_path.replace(".pt", ".yaml")
-                if os.path.exists(yaml_path):
-                    resume_info = get_resume_params(yaml_path)
-                    logging.info(resume_info)
+    def warmup_model():
+        if args.checkpoint is not None:
+            if os.path.exists(args.checkpoint):
+                if os.path.isdir(args.checkpoint):  # the ckpt path is a dir, we will use the most recent ckpt file
+                    ckpt_path = get_latest_ckpt(args.checkpoint)
+                    args.checkpoint = ckpt_path
+                    yaml_path = ckpt_path.replace(".pt", ".yaml")
+                    if os.path.exists(yaml_path):
+                        resume_info = get_resume_params(yaml_path)
+                        logging.info(resume_info)
 
-            saved_state_dict = torch.load(args.checkpoint, map_location='cpu')
-            new_state_dict = {}
-            if gan:
-                if "generator.m_source.l_linear.weight" in saved_state_dict:
-                    # checkpoint include generator and discriminator
-                    dest_model = model
-                else:   # checkpoint only include generator
-                    dest_model = model.generator
-                    logging.warning('discriminator is not pretrained!')
-            else:
-                dest_model = model
-
-            for k, v in dest_model.state_dict().items():
-                if k not in saved_state_dict:
-                    logging.warning(
-                        f"{k} is not saved in the checkpoint {args.checkpoint}")
-                    new_state_dict[k] = v
-                elif v.size() != saved_state_dict[k].size():
-                    logging.warning(
-                        f"**{k} size is not same in the checkpoint:"
-                        f" cur size={v.size()}, "
-                        f" saved size={saved_state_dict[k].size()}")
-                    new_state_dict[k] = v
+                saved_state_dict = torch.load(args.checkpoint, map_location='cpu')
+                new_state_dict = {}
+                if gan:
+                    if "generator.m_source.l_linear.weight" in saved_state_dict:
+                        # checkpoint include generator and discriminator
+                        dest_model = model
+                    else:   # checkpoint only include generator
+                        dest_model = model.generator
+                        logging.warning('discriminator is not pretrained!')
                 else:
-                    new_state_dict[k] = saved_state_dict[k]
+                    dest_model = model
 
-            dest_model.load_state_dict(new_state_dict, strict=False)
-            logging.info(f'Loaded checkpoint {args.checkpoint}')
-        else:
-            logging.warning('checkpoint {} do not exsist!'.format(args.checkpoint))
+                for k, v in dest_model.state_dict().items():
+                    if k not in saved_state_dict:
+                        logging.warning(
+                            f"{k} is not saved in the checkpoint {args.checkpoint}")
+                        new_state_dict[k] = v
+                    elif v.size() != saved_state_dict[k].size():
+                        logging.warning(
+                            f"**{k} size is not same in the checkpoint:"
+                            f" cur size={v.size()}, "
+                            f" saved size={saved_state_dict[k].size()}")
+                        new_state_dict[k] = v
+                    else:
+                        new_state_dict[k] = saved_state_dict[k]
+
+                dest_model.load_state_dict(new_state_dict, strict=False)
+                logging.info(f'Loaded checkpoint {args.checkpoint}')
+            else:
+                logging.warning('checkpoint {} do not exsist!'.format(args.checkpoint))
+
+    warmup_model()  # 由于Peft会修改模型参数名称（不只是加个前缀。。），所以这里前后分别加载一下参数
+    use_lora = configs.get("use_lora", False)
+    # add additional LoRA parameters
+    if use_lora:
+        # model = lora.replace_specific_layer_4lora(model, configs)
+        # lora.mark_only_lora_as_trainable(model)
+        # lora.getModelSize_lora(model)
+        from peft import LoraConfig, get_peft_model
+
+        peft_config = LoraConfig(
+            r=configs['lora_r'], lora_alpha=configs['lora_alpha'],
+            target_modules=configs['lora_target_modules'],
+            modules_to_save=configs['modules_to_save']
+        )
+        model = get_peft_model(model, peft_config)
+        model.print_trainable_parameters()
+        model.save_pretrained(configs['train_conf']['model_dir'])
+    warmup_model()
 
     # Dispatch model from cpu to gpu
     model = wrap_cuda_model(args, model)
@@ -210,7 +230,8 @@ def main():
 
             train_dataset.set_epoch(epoch)
             dist.barrier()
-            group_join = dist.new_group(backend="gloo", timeout=datetime.timedelta(seconds=args.timeout))
+            group_join = None
+            # group_join = dist.new_group(backend="gloo", timeout=datetime.timedelta(seconds=args.timeout))
             if gan is True:
                 executor.train_one_epoc_gan(model, optimizer, scheduler, optimizer_d, scheduler_d, train_data_loader, cv_data_loader,
                                             writer, info_dict, scaler, group_join, codec_model, spkemb_model)
@@ -225,7 +246,7 @@ def main():
             del train_dataset
             del train_data_loader
 
-        dist.destroy_process_group(group_join)
+            # dist.destroy_process_group(group_join)
 
 
 if __name__ == '__main__':

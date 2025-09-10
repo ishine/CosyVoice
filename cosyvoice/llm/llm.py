@@ -1730,7 +1730,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
             emotion_num: int = 0,
             non_emotional_label: int = -1,  # 非多情感数据标签
             add_emotion_before_llm: bool = False,  # 输入llm前是否加上情绪向量
-            emotion_fuse_type: str = 'add',  # add OR cat
+            emotion_fuse_type: str = 'cat',  # add OR cat
     ):
         super().__init__()
         self.llm_input_size = llm_input_size
@@ -1766,11 +1766,12 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
                 nn.Linear(128, num_emotions)
             )
         self.adv_weight = 1.0  # 对抗强度
-        self.preserve_weight = 0.1  # 保持音色相似
+        self.preserve_weight = 1.0  # 保持音色相似
         self.grl_lambda = 1.0  # GRL 系数
 
         if self.add_emotion_before_llm:
             self.emotion_affine_layer = nn.Linear(text_encoder_input_size, llm_input_size, bias=False)
+            # self.emotion_affine_layer = nn.Linear(text_encoder_input_size, llm_input_size)
 
         self.vllm_sample_params = vllm_sample_params
         logger.info(f"vllm sampling params: {vllm_sample_params}")
