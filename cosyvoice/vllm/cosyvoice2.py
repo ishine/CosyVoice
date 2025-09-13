@@ -23,8 +23,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2 model compatible with HuggingFace weights."""
+import time
+import logging
+import torch
 from vllm.model_executor.models.qwen2 import *
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from flashinfer.sampling import top_k_top_p_sampling_from_probs
 
+logger = logging.getLogger(__name__)
 
 class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
@@ -70,6 +76,15 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
+        #self.sampler = Sampler()
+        self.codebooknum = 1
+        self.codec_id_max = 6561
+        self.eosid = self.codec_id_max
+        self.generated_tokens = {}   # cache of each decoded token sequence
+        self.temperature = 0.8
+        self.topp = 0.8
+        self.topk = 20
+
     def get_input_embeddings(self, input_ids: torch.Tensor, request_info=None) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
@@ -101,3 +116,61 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                            if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
+
+    def sample(self, logits, sampling_metadata, request_info):
+        request_info = list(request_info.keys())
+        for req_id in request_info:
+            if req_id not in self.generated_tokens:
+                self.generated_tokens[req_id] = torch.tensor([], dtype=torch.int32, device=logits.device)   # add null token sequence
+
+        output = self.sampler(logits, sampling_metadata)   # vllm sample
+        vllm_sample_tokens = [output.outputs[idx].samples[0].output_token for idx in range(len(request_info))]
+
+        # sampling
+        sample_ids = self.ras_sample(logits, request_info)
+        # check early stop
+        for batch_idx in range(sample_ids.shape[0]):
+            for retry in range(20):
+                end = (sample_ids[batch_idx] == self.eosid).all()
+                if end and self.generated_tokens[
+                    request_info[batch_idx]].shape[0] < 20:
+                    resample = self.ras_sample(
+                        logits[batch_idx:batch_idx + 1],
+                        [request_info[batch_idx]], retry)
+                    sample_ids[batch_idx:batch_idx + 1] = resample
+                else:
+                    break
+
+        # add new ids
+        for idx, (sample_id, req_id) in enumerate(
+                zip(sample_ids, request_info)):
+            self.generated_tokens[req_id] = torch.cat(
+                [self.generated_tokens[req_id],
+                 torch.tensor([sample_id], dtype=torch.int32, device=sample_id.device)], dim=0)
+            output.outputs[idx].samples[0].output_token = sample_id
+
+        for idx, req_id in enumerate(request_info):
+            if output.outputs[idx].samples[0].output_token == self.eosid:
+                self.generated_tokens.pop(req_id)  # finish, clear cache
+        return output
+
+    def ras_sample(self, logits, request_info, retry_num=0):
+        # first sample
+        logits_temp = (logits / (self.temperature + 0.5 * retry_num)).contiguous()
+        probs_temp = torch.softmax(logits_temp, dim=-1)
+        # sample_ids = top_k_top_p_min_p_sampling_from_probs_torch(probs_temp,self.topk+50*retry_num, self.topp+0.5*retry_num) # [B]
+        sample_ids = top_k_top_p_sampling_from_probs(probs_temp, self.topk, self.topp, filter_apply_order='joint')
+
+        if retry_num > 0:
+            return sample_ids
+
+        # resample
+        logits_temp = (logits / 1.1).contiguous()
+        probs_temp = torch.softmax(logits_temp, dim=-1)
+        # resample_ids = top_k_top_p_min_p_sampling_from_probs_torch(probs_temp,self.topk+40, self.topp+0.15) # [B]
+        resample_ids = top_k_top_p_sampling_from_probs(probs_temp, self.topk, self.topp, filter_apply_order='joint')
+        # compute repeat
+        for sp, req_id, resp in zip(sample_ids, request_info, resample_ids):
+            rep_nums = (self.generated_tokens[req_id][-16:] == sp).sum(0)
+            sp = torch.where(rep_nums >= 1.6, resp, sp)
+        return sample_ids

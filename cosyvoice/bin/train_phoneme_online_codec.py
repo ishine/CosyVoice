@@ -120,19 +120,20 @@ def main():
     use_lora = configs.get("use_lora", False)
 
     start_epoch = 0
-    resume_info = None
     def warmup_model():
+        resume_info = None
         if args.checkpoint is not None:
             if os.path.exists(args.checkpoint):
                 if os.path.isdir(args.checkpoint):  # the ckpt path is a dir, we will use the most recent ckpt file
                     ckpt_path = get_latest_ckpt(args.checkpoint)
-                    args.checkpoint = ckpt_path
                     yaml_path = ckpt_path.replace(".pt", ".yaml")
                     if os.path.exists(yaml_path):
                         resume_info = get_resume_params(yaml_path)
                         logging.info(resume_info)
+                else:
+                    ckpt_path = args.checkpoint
 
-                saved_state_dict = torch.load(args.checkpoint, map_location='cpu')
+                saved_state_dict = torch.load(ckpt_path, map_location='cpu')
                 if 'generator' in saved_state_dict:
                     logging.info('use pretrained generator.')
                     saved_state_dict = saved_state_dict['generator']
@@ -153,7 +154,7 @@ def main():
                 for k, v in dest_model.state_dict().items():
                     if k not in saved_state_dict:
                         logging.warning(
-                            f"{k} is not saved in the checkpoint {args.checkpoint}")
+                            f"{k} is not saved in the checkpoint {ckpt_path}")
                         new_state_dict[k] = v
                     elif v.size() != saved_state_dict[k].size():
                         logging.warning(
@@ -176,11 +177,11 @@ def main():
                         new_state_dict[k] = saved_state_dict[k]
 
                 dest_model.load_state_dict(new_state_dict, strict=False)
-                logging.info(f'Loaded checkpoint {args.checkpoint}')
+                logging.info(f'Loaded checkpoint {ckpt_path}')
             else:
                 logging.warning('checkpoint {} do not exsist!'.format(args.checkpoint))
-
-    warmup_model()
+        return resume_info
+    resume_info = warmup_model()
     # add additional LoRA parameters  先加载预训练模型的参数，之后再添加LoRA
     if use_lora:
         # model = lora.replace_specific_layer_4lora(model, configs)
@@ -197,7 +198,7 @@ def main():
         model.print_trainable_parameters()
         model.save_pretrained(configs['train_conf']['model_dir'])
 
-    warmup_model()
+    resume_info = warmup_model()
     # Dispatch model from cpu to gpu
     model = wrap_cuda_model(args, model)
     rank = int(os.environ["LOCAL_RANK"])

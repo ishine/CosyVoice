@@ -577,7 +577,7 @@ class Qwen2LM(TransformerLM):
                 nn.Linear(128, num_emotions)
             )
         self.adv_weight = 1.0  # 对抗强度
-        self.preserve_weight = 0.1  # 保持音色相似
+        self.preserve_weight = 1.0  # 保持音色相似
         self.grl_lambda = 1.0  # GRL 系数
 
         self.llm_input_size = llm_input_size
@@ -835,6 +835,7 @@ class Qwen2LM(TransformerLM):
             min_token_text_ratio: float = 2,
             uuid: str = '',
             emotion_lab=[-1, ],
+            loracfg=None,
     ) -> Generator[torch.Tensor, None, None]:
         if isinstance(text, Tuple):
             text, pho = text  # here we only use text, the phoneme is not used
@@ -883,13 +884,14 @@ class Qwen2LM(TransformerLM):
         max_len = int((text_len - prompt_text_len) * max_token_text_ratio)
 
         # 5. step by step decode
-        async for token in self.inference_wrapper(lm_input, sampling, min_len, max_len, uuid):
+        async for token in self.inference_wrapper(lm_input, sampling, min_len, max_len, uuid, loracfg):
             yield token
 
     @torch.inference_mode()
-    async def inference_wrapper(self, lm_input, sampling, min_len, max_len, uuid):
-
+    async def inference_wrapper(self, lm_input, sampling, min_len, max_len, uuid, loracfg):
         if self.use_vllm:
+            from vllm.lora.request import LoRARequest
+            lora_request = LoRARequest(**loracfg) if loracfg != None else None
             from vllm import SamplingParams, RequestOutput
             sampling_params = SamplingParams(
                 min_p=self.vllm_sample_params['min_p'],
@@ -908,6 +910,7 @@ class Qwen2LM(TransformerLM):
                     },
                     sampling_params=sampling_params,
                     request_id=uuid or f"{time.time()}",
+                    lora_request=lora_request,
             ):
                 # top_id = output.outputs[0]
                 top_id = list(output.outputs[0].token_ids)[-1]
@@ -2057,6 +2060,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
             min_token_text_ratio: float = 2,
             uuid: str = "",
             emotion_lab: list = [-1, ],
+            loracfg=None,
     ) -> Generator[torch.Tensor, None, None]:
         device = embedding.device
         emotion_lab_tensor = torch.tensor(emotion_lab, dtype=torch.long, device=device)
@@ -2148,6 +2152,8 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
 
         # 5. step by step decode
         if self.use_vllm:
+            from vllm.lora.request import LoRARequest
+            lora_request = LoRARequest(**loracfg) if loracfg != None else None
             from vllm import SamplingParams
             sampling_params = SamplingParams(
                 min_p=self.vllm_sample_params['min_p'],
@@ -2166,6 +2172,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
                     },
                     sampling_params=sampling_params,
                     request_id=uuid or f"{time.time()}",
+                    lora_request=lora_request,
             ):
                 # top_id = output.outputs[0]
                 top_id = list(output.outputs[0].token_ids)[-1]
