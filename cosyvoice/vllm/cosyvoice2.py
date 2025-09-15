@@ -86,7 +86,7 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.codec_id_max = 6561
         self.eosid = self.codec_id_max
         self.generated_tokens = {}   # cache of each decoded token sequence
-        self.running_req = {}
+        self.running_reqs = {}
         self.temperature = 1.0
         self.topp = 0.8
         self.topk = 5
@@ -165,7 +165,7 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         for idx, req_id in enumerate(request_info):
             if output.outputs[idx].samples[0].output_token == self.eosid or self.running_reqs[req_id] - curtime > 3600:
                 self.generated_tokens.pop(req_id)  # finish, clear cache
-                self.running_req.pop(req_id)
+                self.running_reqs.pop(req_id)
                 logger.info(f'delete request {req_id}')
 
         return output
