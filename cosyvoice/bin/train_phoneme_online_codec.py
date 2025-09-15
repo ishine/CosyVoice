@@ -191,14 +191,18 @@ def main():
 
         peft_config = LoraConfig(
             r=configs['lora_r'], lora_alpha=configs['lora_alpha'],
-            target_modules=configs['lora_target_modules'],
+            # target_modules=configs['lora_target_modules'],
             modules_to_save=configs['modules_to_save']
         )
         model = get_peft_model(model, peft_config)
         model.print_trainable_parameters()
         model.save_pretrained(configs['train_conf']['model_dir'])
 
-    resume_info = warmup_model()
+        resume_info = warmup_model()
+        for n, p in model.named_parameters():
+            if p.requires_grad:
+                print(f"trainable module name: {n}, shepe:{p.shape}")
+
     # Dispatch model from cpu to gpu
     model = wrap_cuda_model(args, model)
     rank = int(os.environ["LOCAL_RANK"])

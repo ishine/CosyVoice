@@ -576,7 +576,7 @@ class Qwen2LM(TransformerLM):
                 nn.ReLU(inplace=True),
                 nn.Linear(128, num_emotions)
             )
-        self.adv_weight = 1.0  # 对抗强度
+        self.adv_weight = 10.0  # 对抗强度,lora训练时主loss比较高，这个loss权重大点才会降下去
         self.preserve_weight = 1.0  # 保持音色相似
         self.grl_lambda = 1.0  # GRL 系数
 
@@ -1758,23 +1758,21 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
             f"llm use prosody: {use_frontend_prsd}, use pause label: {use_pause_label}, "
             f"emotion_num: {emotion_num}, non_emotional_label: {non_emotional_label}, "
             f"add_emotion_before_llm: {add_emotion_before_llm}, emotion_fuse_type: {emotion_fuse_type}")
-        if self.emotion_num > 0:  # emotion_embedding直接放到pho encoder前加入
+        if self.emotion_num > 0:
             self.emotion_embedding = torch.nn.Embedding(self.emotion_num, text_encoder_input_size)
-            self.spk_adapter = SpeakerAdapter(dim=llm_input_size,
-                                              bottleneck=256)
+            self.spk_adapter = SpeakerAdapter(dim=llm_input_size, bottleneck=256)
             num_emotions = max(1, self.emotion_num)  # 避免为0
             self.emo_adversary = nn.Sequential(
                 nn.Linear(llm_input_size, 128),
                 nn.ReLU(inplace=True),
                 nn.Linear(128, num_emotions)
             )
-        self.adv_weight = 1.0  # 对抗强度
+            if self.add_emotion_before_llm:
+                self.emotion_affine_layer = nn.Linear(text_encoder_input_size, llm_input_size, bias=False)
+                # self.emotion_affine_layer = nn.Linear(text_encoder_input_size, llm_input_size)
+        self.adv_weight = 10.0  # 对抗强度,lora训练时主loss比较高，这个loss权重大点才会降下去
         self.preserve_weight = 1.0  # 保持音色相似
         self.grl_lambda = 1.0  # GRL 系数
-
-        if self.add_emotion_before_llm:
-            self.emotion_affine_layer = nn.Linear(text_encoder_input_size, llm_input_size, bias=False)
-            # self.emotion_affine_layer = nn.Linear(text_encoder_input_size, llm_input_size)
 
         self.vllm_sample_params = vllm_sample_params
         logger.info(f"vllm sampling params: {vllm_sample_params}")
