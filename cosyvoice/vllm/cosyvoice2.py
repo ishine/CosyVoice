@@ -77,11 +77,11 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-        self.sampler = Sampler()   # 注释这行，则会使用vllm原始采样
+        # self.sampler = Sampler()   # 注释这行，则会使用vllm原始采样
         if hasattr(self, "sampler"):
             logger.info(f"{self} use user-define sampler.")
         else:
-            logger.ingo(f"{self} use vllm sampler.")
+            logger.info(f"{self} use vllm sampler.")
         self.codebooknum = 1
         self.codec_id_max = 6561
         self.eosid = self.codec_id_max
@@ -157,6 +157,7 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.generated_tokens[req_id] = torch.cat(
                 [self.generated_tokens[req_id],
                  torch.tensor([sample_id], dtype=torch.int32, device=sample_id.device)], dim=0)
+            self.generated_tokens[req_id] = self.generated_tokens[req_id][-20:]
             output.outputs[idx].samples[0].output_token = sample_id
             output.outputs[idx].samples[0].logprobs = {sample_id: Logprob(0.0)}   # logprob貌似没有用，但是需要，设为0
 
