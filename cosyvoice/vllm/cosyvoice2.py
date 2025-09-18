@@ -26,12 +26,15 @@
 import time
 import logging
 import torch
+from typing import Dict, List, Optional
 from vllm.model_executor.models.qwen2 import *
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.sequence import Logprob
+from vllm.model_executor.sampling_metadata import SamplingMetadata, SequenceGroupToSample
 from flashinfer.sampling import top_k_top_p_sampling_from_probs
 
 logger = logging.getLogger(__name__)
+
 
 class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
@@ -77,7 +80,7 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-        # self.sampler = Sampler()   # 注释这行，则会使用vllm原始采样
+        self.sampler = Sampler()   # 注释这行，则会使用vllm原始采样
         if hasattr(self, "sampler"):
             logger.info(f"{self} use user-define sampler.")
         else:
@@ -90,6 +93,7 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.temperature = 1.0
         self.topp = 0.8
         self.topk = 5
+        self.window = 10  # repeat aware sampling window
 
     def get_input_embeddings(self, input_ids: torch.Tensor, request_info=None) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -105,6 +109,7 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                    inputs_embeds)
         return hidden_states
 
+    @torch.amp.autocast('cuda',torch.float32)
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
@@ -123,6 +128,7 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
         return loader.load_weights(weights)
 
+    @torch.amp.autocast('cuda',torch.float32)
     def sample(self, logits, sampling_metadata, request_info):
         request_info = list(request_info.keys())
         # clean regularly
@@ -159,7 +165,7 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                  torch.tensor([sample_id], dtype=torch.int32, device=sample_id.device)], dim=0)
             self.generated_tokens[req_id] = self.generated_tokens[req_id][-20:]
             output.outputs[idx].samples[0].output_token = sample_id
-            output.outputs[idx].samples[0].logprobs = {sample_id: Logprob(0.0)}   # logprob貌似没有用，但是需要，设为0
+            output.outputs[idx].samples[0].logprobs = {sample_id: Logprob(float('inf'))}   # logprob貌似没有用，但是需要，设为inf
 
         output.sampled_token_ids = sample_ids.unsqueeze(1)  # B,1
 
@@ -171,25 +177,144 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         return output
 
+    def check_sample_id(self, sample_ids):
+        vocab_size = self.config.vocab_size  # 或 self.codec_id_max
+        if sample_ids.numel() > 0:
+            smin = int(sample_ids.min().item())
+            smax = int(sample_ids.max().item())
+            if smin < 0 or smax >= vocab_size:
+                logger.error("Invalid sample_ids range smin=%d smax=%d vocab=%d",
+                            smin, smax, vocab_size)
+                # 可选：raise IndexError，或临时 clamp 并记录
+                raise IndexError("sample_ids out of range")
+
     def ras_sample(self, logits, request_info, retry_num=0):
         # first sample
-        logits_temp = (logits / (self.temperature + 0.5 * retry_num)).contiguous()
+        logits = logits.to(torch.float)
+        logits_temp = (logits / (self.temperature + 0.05 * retry_num)).contiguous()
         probs_temp = torch.softmax(logits_temp, dim=-1)
-        # sample_ids = top_k_top_p_min_p_sampling_from_probs_torch(probs_temp,self.topk+50*retry_num, self.topp+0.5*retry_num) # [B]
-        sample_ids = top_k_top_p_sampling_from_probs(probs_temp, self.topk, self.topp, filter_apply_order='joint')
-
+        # TODO: ERROR topk和topp太小时下面的方法会采样出非法值: 超出logits维度
+        sample_ids = top_k_top_p_sampling_from_probs(probs_temp, self.topk, self.topp, check_nan=True)
+        self.check_sample_id(sample_ids)
         if retry_num > 0:
             return sample_ids
 
         # resample
-        logits_temp = (logits / 1.1).contiguous()
-        probs_temp = torch.softmax(logits_temp, dim=-1)
-        # resample_ids = top_k_top_p_min_p_sampling_from_probs_torch(probs_temp,self.topk+40, self.topp+0.15) # [B]
-        resample_ids = top_k_top_p_sampling_from_probs(probs_temp, self.topk+15, self.topp+0.15, filter_apply_order='joint')
+        logits_temp1 = (logits / 1.1).contiguous()
+        probs_temp1 = torch.softmax(logits_temp1, dim=-1)
+        resample_ids = top_k_top_p_sampling_from_probs(probs_temp1, self.topk+15, self.topp+0.15, check_nan=True)
         # compute repeat
         for idx, req_id in enumerate(request_info):
             sp = sample_ids[idx]
             rep_nums = (self.generated_tokens[req_id][-10:] == sp).sum(0)
             if rep_nums >= 1:
                 sample_ids[idx] = resample_ids[idx]
+        self.check_sample_id(sample_ids)
         return sample_ids
+
+    def sample_vllm_ras(self, logits: torch.Tensor, sampling_metadata: SamplingMetadata,
+               request_info: Dict) -> SamplerOutput:
+        """
+        使用vLLM的Sampler实现ras_sample功能，包含重采样机制
+        目前还容易出现连续采样出0的问题
+        Args:
+            logits: 模型输出的logits张量
+            sampling_metadata: vLLM的采样元数据
+            request_info: 请求信息字典
+
+        Returns:
+            SamplerOutput: 包含采样结果的vLLM输出对象
+        """
+        request_ids = list(request_info.keys())
+        curtime = time.time()
+
+        # 初始化请求跟踪数据结构
+        for req_id in request_ids:
+            if req_id not in self.running_reqs:
+                self.running_reqs[req_id] = curtime
+            if req_id not in self.generated_tokens:
+                self.generated_tokens[req_id] = torch.tensor(
+                    [], dtype=torch.int32, device=logits.device)
+
+        # 第一次采样（使用原始参数）
+        output = self.sampler(logits, sampling_metadata)
+        sample_ids = torch.tensor([
+            output.outputs[idx].samples[0].output_token
+            for idx in range(len(request_ids))
+        ], device=logits.device)
+
+        # 修改拷贝的 seq_groups 中的采样参数
+        copied_seq_groups = []
+        for seq_group in sampling_metadata.seq_groups:
+            copied_seq_group = SequenceGroupToSample(
+                seq_ids=seq_group.seq_ids,
+                sampling_params=seq_group.sampling_params.clone(),  # 此参数需要拷贝出来
+                seq_data=seq_group.seq_data,
+                seq_len=seq_group.seq_len,
+                query_len=seq_group.query_len,
+                generator=seq_group.generator,
+                is_prompt=seq_group.is_prompt,
+                prompt_logprob_indices=seq_group.prompt_logprob_indices,
+                sample_indices=seq_group.sample_indices
+            )
+
+            copied_seq_group.sampling_params.temperature = 1.1
+            if copied_seq_group.sampling_params.top_k is not None:
+                copied_seq_group.sampling_params.top_k = seq_group.sampling_params.top_k + 15
+            if copied_seq_group.sampling_params.top_p is not None:
+                copied_seq_group.sampling_params.top_p = min(seq_group.sampling_params.top_p + 0.15, 1.0)
+
+            copied_seq_groups.append(copied_seq_group)
+
+        resampling_metadata = SamplingMetadata(
+            seq_groups=copied_seq_groups,
+            selected_token_indices=sampling_metadata.selected_token_indices,
+            categorized_sample_indices=sampling_metadata.categorized_sample_indices,
+            num_prompts=sampling_metadata.num_prompts,
+            skip_sampler_cpu_output=sampling_metadata.skip_sampler_cpu_output,
+            reuse_sampling_tensors=sampling_metadata.reuse_sampling_tensors,
+        )
+        # 执行重采样
+        resample_output = self.sampler(logits, resampling_metadata)
+        resample_ids = torch.tensor([
+            resample_output.outputs[idx].samples[0].output_token
+            for idx in range(len(request_ids))
+        ], device=logits.device)
+
+        # 检查重复并决定是否使用重采样结果
+        for idx, req_id in enumerate(request_ids):
+            sp = sample_ids[idx]
+            # 检查最近10个token是否有重复
+            if len(self.generated_tokens[req_id]) > 0:
+                rep_nums = (self.generated_tokens[req_id][-self.window:] == sp).sum()
+                if rep_nums >= 1:
+                    sample_ids[idx] = resample_ids[idx]
+
+        # 更新生成的token历史
+        for idx, (sample_id, req_id) in enumerate(zip(sample_ids, request_ids)):
+            self.generated_tokens[req_id] = torch.cat([
+                self.generated_tokens[req_id],
+                torch.tensor([sample_id], dtype=torch.int32,
+                             device=sample_id.device)
+            ], dim=0)
+            # 保持历史记录不超过10个token
+            if len(self.generated_tokens[req_id]) > self.window:
+                self.generated_tokens[req_id] = self.generated_tokens[req_id][-self.window:]
+
+            # 更新输出对象
+            output.outputs[idx].samples[0].output_token = sample_id.item()
+            # 这里需要正确设置logprobs，对logits处理后，有时只剩1best, 这里可设置为inf
+            output.outputs[idx].samples[0].logprobs = {sample_id.item(): Logprob(float('inf'))}
+
+        output.sampled_token_ids = sample_ids.unsqueeze(1)  # B,1  这个是vllm计算embedding需要的id
+        # 清理完成的请求
+        for idx, req_id in enumerate(request_ids):
+            if (output.outputs[idx].samples[0].output_token == self.eosid or
+                    curtime - self.running_reqs[req_id] > 3600):
+                if req_id in self.generated_tokens:
+                    del self.generated_tokens[req_id]
+                if req_id in self.running_reqs:
+                    del self.running_reqs[req_id]
+                logger.info(f'Finished and cleared request {req_id}')
+
+        return output

@@ -905,8 +905,8 @@ class Qwen2LM(TransformerLM):
 
             async for output in self.vllm.generate(
                     {
-                        "prompt_embeds": lm_input.squeeze(
-                            0).to(torch.bfloat16).to(lm_input.device),
+                        # "prompt_embeds": lm_input.squeeze(0).to(torch.bfloat16).to(lm_input.device),
+                        "prompt_embeds": lm_input.squeeze(0).to(lm_input.device),
                     },
                     sampling_params=sampling_params,
                     request_id=uuid or f"{time.time()}",
@@ -2165,8 +2165,8 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
 
             async for output in self.vllm.generate(
                     {
-                        "prompt_embeds": lm_input.squeeze(
-                            0).to(torch.bfloat16).to(lm_input.device),
+                        # "prompt_embeds": lm_input.squeeze(0).to(torch.bfloat16).to(lm_input.device),
+                        "prompt_embeds": lm_input.squeeze(0).to(lm_input.device),
                     },
                     sampling_params=sampling_params,
                     request_id=uuid or f"{time.time()}",
