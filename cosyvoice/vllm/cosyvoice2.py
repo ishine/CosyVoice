@@ -117,6 +117,9 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata, self.lm_head.bias)
+        if torch.isnan(logits).any():
+            logger.error(f"logits has nan !!! which is abnormal."
+                         f" \nhidden_states: {hidden_states}, \nlogits {logits}")
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -139,23 +142,42 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             if req_id not in self.generated_tokens:
                 self.generated_tokens[req_id] = torch.tensor([], dtype=torch.int32, device=logits.device)   # add null token sequence
 
+        # vllm采样，得到输出，注意这里是全batch运算，不去掉nan
         output = self.sampler(logits, sampling_metadata)   # vllm sample
-        vllm_sample_tokens = [output.outputs[idx].samples[0].output_token for idx in range(len(request_info))]
+        sample_ids = torch.tensor([output.outputs[idx].samples[0].output_token for idx in range(len(request_info))],
+                                  dtype=torch.int32, device=logits.device)  # B,
+
+        # nan check in logits
+        B = logits.size(0)
+        device = logits.device
+        is_nan_mask = torch.isnan(logits).any(dim=-1)   # B
+        ori_logits = logits.clone()
+        logits = logits[~is_nan_mask]   # 非nan的logits可以进入后续采样，nan的logits直接置为eos
 
         # sampling
-        sample_ids = self.ras_sample(logits, request_info)
-        # check early stop
-        for batch_idx in range(sample_ids.shape[0]):
-            for retry in range(20):
-                end = (sample_ids[batch_idx] == self.eosid).all()
-                if end and self.generated_tokens[
-                    request_info[batch_idx]].shape[0] < 15:
-                    resample = self.ras_sample(
-                        logits[batch_idx:batch_idx + 1],
-                        [request_info[batch_idx]], retry)
-                    sample_ids[batch_idx:batch_idx + 1] = resample
-                else:
-                    break
+        if logits.size(0) > 0:
+            sample_ids = self.ras_sample(logits, request_info)
+            # check early stop
+            for batch_idx in range(sample_ids.shape[0]):
+                for retry in range(20):
+                    end = (sample_ids[batch_idx] == self.eosid).all()
+                    if end and self.generated_tokens[
+                        request_info[batch_idx]].shape[0] < 15:
+                        resample = self.ras_sample(
+                            logits[batch_idx:batch_idx + 1],
+                            [request_info[batch_idx]], retry)
+                        sample_ids[batch_idx:batch_idx + 1] = resample
+                    else:
+                        break
+
+        # 将logits中有logits的采样结果直接置为eosid，加入sample_ids
+        new_sample_ids = torch.tensor([self.eosid,]*B, dtype=torch.int32, device=device)
+        non_nan_idx = 0
+        for idx in range(B):
+            if not is_nan_mask[idx]:
+                new_sample_ids[idx] = sample_ids[non_nan_idx]
+                non_nan_idx += 1
+        sample_ids = new_sample_ids
 
         # add new ids
         for idx, (sample_id, req_id) in enumerate(
@@ -163,7 +185,7 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.generated_tokens[req_id] = torch.cat(
                 [self.generated_tokens[req_id],
                  torch.tensor([sample_id], dtype=torch.int32, device=sample_id.device)], dim=0)
-            self.generated_tokens[req_id] = self.generated_tokens[req_id][-20:]
+            self.generated_tokens[req_id] = self.generated_tokens[req_id][-self.window:]
             output.outputs[idx].samples[0].output_token = sample_id
             output.outputs[idx].samples[0].logprobs = {sample_id: Logprob(float('inf'))}   # logprob貌似没有用，但是需要，设为inf
 
@@ -183,17 +205,13 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             smin = int(sample_ids.min().item())
             smax = int(sample_ids.max().item())
             if smin < 0 or smax >= vocab_size:
-                logger.error("Invalid sample_ids range smin=%d smax=%d vocab=%d",
-                            smin, smax, vocab_size)
-                # 可选：raise IndexError，或临时 clamp 并记录
-                raise IndexError("sample_ids out of range")
+                logger.error("Invalid sample_ids range smin=%d smax=%d vocab=%d", smin, smax, vocab_size)
 
     def ras_sample(self, logits, request_info, retry_num=0):
         # first sample
         logits = logits.to(torch.float)
         logits_temp = (logits / (self.temperature + 0.05 * retry_num)).contiguous()
         probs_temp = torch.softmax(logits_temp, dim=-1)
-        # TODO: ERROR topk和topp太小时下面的方法会采样出非法值: 超出logits维度
         sample_ids = top_k_top_p_sampling_from_probs(probs_temp, self.topk, self.topp, check_nan=True)
         self.check_sample_id(sample_ids)
         if retry_num > 0:
@@ -206,7 +224,7 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         # compute repeat
         for idx, req_id in enumerate(request_info):
             sp = sample_ids[idx]
-            rep_nums = (self.generated_tokens[req_id][-10:] == sp).sum(0)
+            rep_nums = (self.generated_tokens[req_id][-self.window:] == sp).sum(0)
             if rep_nums >= 1:
                 sample_ids[idx] = resample_ids[idx]
         self.check_sample_id(sample_ids)
