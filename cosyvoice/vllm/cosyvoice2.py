@@ -94,6 +94,7 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.topp = 0.8
         self.topk = 5
         self.window = 10  # repeat aware sampling window
+        self.early_stop_check = False
 
     def get_input_embeddings(self, input_ids: torch.Tensor, request_info=None) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -151,24 +152,26 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         B = logits.size(0)
         device = logits.device
         is_nan_mask = torch.isnan(logits).any(dim=-1)   # B
-        ori_logits = logits.clone()
-        logits = logits[~is_nan_mask]   # 非nan的logits可以进入后续采样，nan的logits直接置为eos
+        non_nan_logits = logits[~is_nan_mask]   # 非nan的logits可以进入后续采样，nan的logits直接置为eos
+        non_nan_request = [request_info[ii] for ii in range(B) if not is_nan_mask[ii]]
 
-        # sampling
-        if logits.size(0) > 0:
-            sample_ids = self.ras_sample(logits, request_info)
-            # check early stop
-            for batch_idx in range(sample_ids.shape[0]):
-                for retry in range(20):
-                    end = (sample_ids[batch_idx] == self.eosid).all()
-                    if end and self.generated_tokens[
-                        request_info[batch_idx]].shape[0] < 15:
-                        resample = self.ras_sample(
-                            logits[batch_idx:batch_idx + 1],
-                            [request_info[batch_idx]], retry)
-                        sample_ids[batch_idx:batch_idx + 1] = resample
-                    else:
-                        break
+        # sampling, for non nan request
+        if non_nan_logits.size(0) > 0:
+            sample_ids = self.ras_sample(non_nan_logits, non_nan_request)
+
+            # Optional: check early stop
+            if self.early_stop_check:
+                for batch_idx in range(sample_ids.shape[0]):
+                    for retry in range(20):
+                        end = (sample_ids[batch_idx] == self.eosid).all()
+                        if end and self.generated_tokens[
+                            non_nan_request[batch_idx]].shape[0] < 15:
+                            resample = self.ras_sample(
+                                non_nan_logits[batch_idx:batch_idx + 1],
+                                [non_nan_request[batch_idx]], retry)
+                            sample_ids[batch_idx:batch_idx + 1] = resample
+                        else:
+                            break
 
         # 将logits中有logits的采样结果直接置为eosid，加入sample_ids
         new_sample_ids = torch.tensor([self.eosid,]*B, dtype=torch.int32, device=device)
@@ -179,13 +182,13 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 non_nan_idx += 1
         sample_ids = new_sample_ids
 
-        # add new ids
+        # add new ids, for all request
         for idx, (sample_id, req_id) in enumerate(
                 zip(sample_ids, request_info)):
             self.generated_tokens[req_id] = torch.cat(
                 [self.generated_tokens[req_id],
                  torch.tensor([sample_id], dtype=torch.int32, device=sample_id.device)], dim=0)
-            self.generated_tokens[req_id] = self.generated_tokens[req_id][-self.window:]
+            self.generated_tokens[req_id] = self.generated_tokens[req_id][-20:]
             output.outputs[idx].samples[0].output_token = sample_id
             output.outputs[idx].samples[0].logprobs = {sample_id: Logprob(float('inf'))}   # logprob貌似没有用，但是需要，设为inf
 
@@ -213,21 +216,21 @@ class CosyVoice2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         logits_temp = (logits / (self.temperature + 0.05 * retry_num)).contiguous()
         probs_temp = torch.softmax(logits_temp, dim=-1)
         sample_ids = top_k_top_p_sampling_from_probs(probs_temp, self.topk, self.topp, check_nan=True)
-        self.check_sample_id(sample_ids)
+        # self.check_sample_id(sample_ids)
         if retry_num > 0:
             return sample_ids
 
         # resample
         logits_temp1 = (logits / 1.1).contiguous()
         probs_temp1 = torch.softmax(logits_temp1, dim=-1)
-        resample_ids = top_k_top_p_sampling_from_probs(probs_temp1, self.topk+15, self.topp+0.15, check_nan=True)
+        resample_ids = top_k_top_p_sampling_from_probs(probs_temp1, self.topk+20, self.topp+0.15, check_nan=True)
         # compute repeat
         for idx, req_id in enumerate(request_info):
             sp = sample_ids[idx]
             rep_nums = (self.generated_tokens[req_id][-self.window:] == sp).sum(0)
             if rep_nums >= 1:
                 sample_ids[idx] = resample_ids[idx]
-        self.check_sample_id(sample_ids)
+        # self.check_sample_id(sample_ids)
         return sample_ids
 
     def sample_vllm_ras(self, logits: torch.Tensor, sampling_metadata: SamplingMetadata,
