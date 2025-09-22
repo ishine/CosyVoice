@@ -1915,7 +1915,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
         emotion_lab_tensor = torch.tensor(batch['emos'], dtype=torch.long, device=device)
 
         # 0. prepare llm_target
-        if self.add_emotion_before_llm and self.emotion_fuse_type == 'cat':
+        if self.emotion_num > 0 and self.emotion_fuse_type == 'cat':
             extra_token_num = 4   # 包含情绪token
         else:
             extra_token_num = 2   # spk_embeding, task_id

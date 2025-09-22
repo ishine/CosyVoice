@@ -191,7 +191,7 @@ def main():
 
         peft_config = LoraConfig(
             r=configs['lora_r'], lora_alpha=configs['lora_alpha'],
-            # target_modules=configs['lora_target_modules'],
+            target_modules=configs['lora_target_modules'],
             modules_to_save=configs['modules_to_save']
         )
         model = get_peft_model(model, peft_config)
@@ -243,40 +243,70 @@ def main():
     # ema.to(f'cuda:{rank}')
 
     # Start training loop
-    for epoch in range(start_epoch, info_dict['max_epoch']):
-        executor.epoch = epoch
+    if len(configs['train_data_indexes']) == 1:
+        data_indexes = configs['train_data_indexes'][0]
+        # Get dataset & dataloader
+        logging.info(f"Loading train data index {data_indexes}")
+        train_dataset, cv_dataset, train_data_loader, cv_data_loader = \
+            init_json_dataset(args, configs, gan, data_indexes)
 
-        for data_i, data_indexes in enumerate(configs['train_data_indexes']):
-            if executor.data_idx >= len(configs['train_data_indexes']) - 1:
-                executor.data_idx = 0
-            if data_i != executor.data_idx:
-                logging.warning(f"Jumped train data {data_indexes}")
-                continue
-
-            # Get dataset & dataloader
-            logging.info(f"Loading train data index {data_indexes}")
-            train_dataset, cv_dataset, train_data_loader, cv_data_loader = \
-                init_json_dataset(args, configs, gan, data_indexes)
-
+        dist.barrier()
+        for epoch in range(start_epoch, info_dict['max_epoch']):
+            executor.epoch = epoch
             train_dataset.set_epoch(epoch)
-            dist.barrier()
+            executor.data_idx = 0
+
             group_join = None
-            # group_join = dist.new_group(backend="gloo", timeout=datetime.timedelta(seconds=args.timeout))
             if gan is True:
-                executor.train_one_epoc_gan(model, optimizer, scheduler, optimizer_d, scheduler_d, train_data_loader, cv_data_loader,
-                                            writer, info_dict, scaler, group_join, codec_model, spkemb_model)
+                executor.train_one_epoc_gan(model, optimizer, scheduler,
+                                            optimizer_d, scheduler_d,
+                                            train_data_loader,
+                                            cv_data_loader,
+                                            writer, info_dict, scaler,
+                                            group_join, codec_model,
+                                            spkemb_model)
             else:
-                executor.train_one_epoc(model, optimizer, scheduler, train_data_loader, cv_data_loader,
-                                        writer, info_dict, scaler, group_join, codec_model, spkemb_model)
+                executor.train_one_epoc(model, optimizer, scheduler,
+                                        train_data_loader, cv_data_loader,
+                                        writer, info_dict, scaler,
+                                        group_join, codec_model,
+                                        spkemb_model)
 
-            executor.data_idx = data_i + 1
-            if data_i >= len(configs['train_data_indexes']) - 1:
-                executor.data_idx = 0
+    else:
+        for epoch in range(start_epoch, info_dict['max_epoch']):
+            executor.epoch = epoch
 
-            del train_dataset
-            del train_data_loader
+            for data_i, data_indexes in enumerate(configs['train_data_indexes']):
+                if executor.data_idx >= len(configs['train_data_indexes']) - 1:
+                    executor.data_idx = 0
+                if data_i != executor.data_idx:
+                    logging.warning(f"Jumped train data {data_indexes}")
+                    continue
 
-            # dist.destroy_process_group(group_join)
+                # Get dataset & dataloader
+                logging.info(f"Loading train data index {data_indexes}")
+                train_dataset, cv_dataset, train_data_loader, cv_data_loader = \
+                    init_json_dataset(args, configs, gan, data_indexes)
+
+                train_dataset.set_epoch(epoch)
+                dist.barrier()
+                group_join = None
+                # group_join = dist.new_group(backend="gloo", timeout=datetime.timedelta(seconds=args.timeout))
+                if gan is True:
+                    executor.train_one_epoc_gan(model, optimizer, scheduler, optimizer_d, scheduler_d, train_data_loader, cv_data_loader,
+                                                writer, info_dict, scaler, group_join, codec_model, spkemb_model)
+                else:
+                    executor.train_one_epoc(model, optimizer, scheduler, train_data_loader, cv_data_loader,
+                                            writer, info_dict, scaler, group_join, codec_model, spkemb_model)
+
+                executor.data_idx = data_i + 1
+                if data_i >= len(configs['train_data_indexes']) - 1:
+                    executor.data_idx = 0
+
+                del train_dataset
+                del train_data_loader
+
+                # dist.destroy_process_group(group_join)
 
 
 if __name__ == '__main__':

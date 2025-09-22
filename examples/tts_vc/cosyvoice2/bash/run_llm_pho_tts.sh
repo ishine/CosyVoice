@@ -13,7 +13,7 @@ dist_backend="nccl"
 num_workers=1
 prefetch=100
 train_engine=torch_ddp
-exp_name=llm_pho_31w1_tts_emo2
+exp_name=llm_pho_31w1_tts_id
 exp_conf=cosyvoice_pho_tts
 portnum=2101
 pretrained_model_dir=exp/$exp_name
@@ -26,7 +26,7 @@ if [ ${stage} -le 0 ] && [ ${stop_stage} -ge 0 ]; then
 # --rdzv_id=$job_id --rdzv_backend="c10d" --rdzv_endpoint="localhost:0" \
 run_command() {
   for model in $exp_name; do
-    OMP_NUM_THREADS=4 \
+    OMP_NUM_THREADS=4 TOKENIZERS_PARALLELISM=false \
     torchrun --nnodes=1 --nproc_per_node=$num_gpus \
       --master_port $portnum   \
       cosyvoice/bin/train_phoneme_online_codec.py \
