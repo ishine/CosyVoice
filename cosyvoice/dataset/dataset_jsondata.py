@@ -267,7 +267,7 @@ def Dataset(json_file,
             total_dur, file_list = info
             for fname, dur, sequence in file_list:
                 pho = sequence['text']
-                wav_path = os.path.join(wave_dir, speaker_folder, '{}.wav'.format(fname))
+                # wav_path = os.path.join(wave_dir, speaker_folder, '{}.wav'.format(fname))
                 utt = f"{data_name}-{fname}"
                 speaker = f"{data_name}-{sid}"
                 if utt in utt2wav:
@@ -277,7 +277,7 @@ def Dataset(json_file,
                     duplicated_utt += 1
                     continue
 
-                utt2wav[utt] = wav_path
+                # utt2wav[utt] = wav_path
                 utt2pho[utt] = pho
                 utt2spk[utt] = speaker
                 if 'mfa_duration' in sequence:
@@ -298,6 +298,15 @@ def Dataset(json_file,
                 if rich_sample_short_utt>0 and len(pho) < 20:  # 对音素序列长度低于20的音频富采样
                     valid_utt_list.extend([utt]*rich_sample_short_utt)
 
+        with open(f"{kaldi_data_dir}/wav.scp", 'r', encoding='utf-8') as f_scp:
+            for line in f_scp:
+                line = line.strip().split(maxsplit=1)
+                if len(line) != 2:
+                    continue
+                utt, wav = line[0], line[1]
+                utt = f"{data_name}-{utt}"
+                utt2wav[utt] = wav
+        
         text_path = os.path.join(kaldi_data_dir, "text_punc")
         if not os.path.exists(text_path):
             text_path = os.path.join(kaldi_data_dir, 'text')
