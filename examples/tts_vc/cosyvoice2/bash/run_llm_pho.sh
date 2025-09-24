@@ -10,11 +10,11 @@ export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
 num_gpus=$(echo $CUDA_VISIBLE_DEVICES | awk -F "," '{print NF}')
 job_id=1986
 dist_backend="nccl"
-num_workers=8
+num_workers=1
 prefetch=100
 train_engine=torch_ddp
-exp_name=llm_pho_31w
-exp_conf=cosyvoice_pho
+exp_name=llm_pho_v2
+exp_conf=cosyvoice_pho_v2
 pretrained_model_dir=exp/$exp_name
 
 if [ ${stage} -le 0 ] && [ ${stop_stage} -ge 0 ]; then
@@ -25,7 +25,7 @@ portnum=2100
 # --rdzv_id=$job_id --rdzv_backend="c10d" --rdzv_endpoint="localhost:0" \
 run_command() {
   for model in $exp_name; do
-    OMP_NUM_THREADS=4 \
+    OMP_NUM_THREADS=4 TOKENIZERS_PARALLELISM=false \
     torchrun --nnodes=1 --nproc_per_node=$num_gpus \
       --master_port $portnum   \
       cosyvoice/bin/train_phoneme_online_codec.py \

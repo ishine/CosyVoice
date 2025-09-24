@@ -576,7 +576,7 @@ class Qwen2LM(TransformerLM):
                 nn.ReLU(inplace=True),
                 nn.Linear(128, num_emotions)
             )
-        self.adv_weight = 10.0  # 对抗强度,lora训练时主loss比较高，这个loss权重大点才会降下去
+        self.adv_weight = 1.0  # 对抗强度,lora训练时主loss比较高，这个loss权重大点才会降下去
         self.preserve_weight = 1.0  # 保持音色相似
         self.grl_lambda = 1.0  # GRL 系数
 
@@ -1721,6 +1721,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
             length_normalized_loss: bool = True,
             lsm_weight: float = 0.0,
             spk_embed_dim: int = 512,
+            src_attn_layers: int = 1,
             use_frontend_prsd: bool = False,
             use_pause_label: bool = False,
             qwen_sglang_config: dict = None,
@@ -1732,7 +1733,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
             },
             emotion_num: int = 0,
             non_emotional_label: int = -1,  # 非多情感数据标签
-            add_emotion_before_llm: bool = False,  # 输入llm前是否加上情绪向量
+            add_emotion_before_llm: bool = True,  # 是否在输入llm前的位置加入情绪向量
             emotion_fuse_type: str = 'cat',  # add OR cat
     ):
         super().__init__()
@@ -1770,7 +1771,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
             if self.add_emotion_before_llm:
                 self.emotion_affine_layer = nn.Linear(text_encoder_input_size, llm_input_size, bias=False)
                 # self.emotion_affine_layer = nn.Linear(text_encoder_input_size, llm_input_size)
-        self.adv_weight = 10.0  # 对抗强度,lora训练时主loss比较高，这个loss权重大点才会降下去
+        self.adv_weight = 1.0  # 对抗强度,lora训练时主loss比较高，这个loss权重大点才会降下去
         self.preserve_weight = 1.0  # 保持音色相似
         self.grl_lambda = 1.0  # GRL 系数
 
@@ -1779,9 +1780,10 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
 
         self.text_encoder = text_encoder
         self.text_encoder_affine_layer = nn.Linear(
-            self.text_encoder.output_size(), llm_input_size
+            text_encoder_input_size, llm_input_size
         )
         #  Hard code Decoder layer as arc-attention
+        self.src_attn_layers = src_attn_layers
         self.src_attention = torch.nn.ModuleList([
             DecoderLayer(
                 llm_input_size,
@@ -1790,7 +1792,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
                 PositionwiseFeedForward(llm_input_size, 4096, 0.1),
                 dropout_rate=0.1,
                 normalize_before=True,
-            ) for _ in range(1)
+            ) for _ in range(src_attn_layers)
         ])
 
         # 2. build speech token language model related modules
@@ -1951,7 +1953,10 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
             if self.emotion_fuse_type == 'add':
                 pho_token += emotion_emb  # B L D
 
-        pho_token, pho_token_len = self.encode(pho_token, pho_token_len)
+        if self.text_encoder is not None:
+            pho_token, pho_token_len = self.encode(pho_token, pho_token_len)
+        else:
+            pho_token = self.text_encoder_affine_layer(pho_token)
 
         text_token = self.llm.model.model.embed_tokens(text_token)
         text_mask = ~make_pad_mask(text_token_len, text_token.size(1)).unsqueeze(1)  # (B, 1, T1)
@@ -2100,7 +2105,11 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
                 pho += emotion_emb
 
         # 1. encode text
-        pho, pho_len = self.encode(pho, pho_len)
+        if self.text_encoder is not None:
+            pho, pho_len = self.encode(pho, pho_len)
+        else:
+            pho = self.text_encoder_affine_layer(pho)
+            
         text = self.llm.model.model.embed_tokens(text)
 
         text_mask = ~make_pad_mask(text_len, text.size(1)).unsqueeze(
