@@ -1779,9 +1779,14 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
         logger.info(f"vllm sampling params: {vllm_sample_params}")
 
         self.text_encoder = text_encoder
-        self.text_encoder_affine_layer = nn.Linear(
-            text_encoder_input_size, llm_input_size
-        )
+        if text_encoder is not None:
+            self.text_encoder_affine_layer = nn.Linear(
+                text_encoder.output_size(), llm_input_size
+            )
+        else:
+            self.text_encoder_affine_layer = nn.Linear(
+                text_encoder_input_size, llm_input_size
+            )
         #  Hard code Decoder layer as arc-attention
         self.src_attn_layers = src_attn_layers
         self.src_attention = torch.nn.ModuleList([
