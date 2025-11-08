@@ -327,12 +327,13 @@ def Dataset(json_file,
         if os.path.exists(emo_path):
             with open(emo_path, 'r', encoding='utf-8') as ftext:
                 for line in ftext:
-                    line = line.strip().split(maxsplit=1)
-                    if len(line) != 2:
+                    line = line.strip().split()
+                    if len(line) < 2:
                         continue
                     utt, emo = line[0], line[1]
                     utt = f"{data_name}-{utt}"
                     utt2emo[utt] = int(emo)
+            logging.info(f"load emotion labels from {emo_path}, total {len(utt2emo)} utts.")
 
 
         del dataset_info

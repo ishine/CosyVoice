@@ -1,11 +1,13 @@
 import torch
 import os
+import sys
+sys.path.append("../../")
 from hyperpyyaml import load_hyperpyyaml
 
 
 def export_cosyvoice2_vllm(model, model_path, device):
-    if os.path.exists(model_path):
-        return
+    # if os.path.exists(model_path):
+    #     return
     pad_to = DEFAULT_VOCAB_PADDING_SIZE = 64
     vocab_size = model.speech_embedding.num_embeddings
     feature_size = model.speech_embedding.embedding_dim
@@ -65,7 +67,7 @@ def visualize_embedding(VC_model):
 if __name__ == "__main__":
     pretrain_path = "/data/megastore/SHARE/TTS/LAM_TTS/latest/checkpoints/acoustics/qwen/CosyVoice-BlankEN"
     vc_model_path = "/data/megastore/SHARE/TTS/LAM_TTS/latest/checkpoints/LAM-VC/LLM/llm_v2.pt"
-    vc_config_path = "/data/megastore/SHARE/TTS/LAM_TTS/latest/checkpoints/LAM-VC/vc_config_v2.4.yaml"
+    vc_config_path = "/data/megastore/SHARE/TTS/LAM_TTS/latest/checkpoints/LAM-VC/vc_config_v2.5.yaml"
     save_root = "/data/megastore/SHARE/TTS/LAM_TTS/latest/checkpoints/LAM-VC/LLM/vllm"
 
     state_dict = torch.load(vc_model_path)

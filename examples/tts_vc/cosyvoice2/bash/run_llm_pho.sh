@@ -13,7 +13,7 @@ dist_backend="nccl"
 num_workers=1
 prefetch=100
 train_engine=torch_ddp
-exp_name=llm_pho_v2
+exp_name=llm_pho_v2_ft
 exp_conf=cosyvoice_pho_v2
 pretrained_model_dir=exp/$exp_name
 
