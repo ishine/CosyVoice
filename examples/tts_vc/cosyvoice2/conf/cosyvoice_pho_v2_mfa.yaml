@@ -188,7 +188,7 @@ data_pipeline: [
     !ref <filter>,
     !ref <resample>,
     # !ref <get_ref_speech>,
-    # !ref <truncate_phoneme_sequence>,
+    !ref <truncate_phoneme_sequence>,
     !ref <tokenize>,
     !ref <tokenize_pho>,    # tokenize_pho 必须在truncate phoneme之后
     !ref <compute_fbank>,
@@ -659,8 +659,9 @@ train_data: [
 
 train_data_indexes: [
     [
-       0, 1, 2, 3, 4, 5, 
-       30,31,32,33,42,43
+       0, 1, 2, 3, 4, 5,
+    #    30,31,32,33,34,35,36,37,38,39,
+    #    40,41,42,43
     ]
 ]
 

@@ -2150,7 +2150,7 @@ class Qwen2LM_Phoneme_Vllm(torch.nn.Module):
         sos_eos_emb = self.llm_embedding.weight[self.sos_eos].reshape(1, 1, -1)
         task_id_emb = self.llm_embedding.weight[self.task_id].reshape(1, 1, -1)
         if prompt_speech_token_len != 0:
-            prompt_speech_token_emb = self.speech_embedding(prompt_speech_token)
+            prompt_speech_token_emb = self.speech_embedding(prompt_speech_token.clone())
         else:
             prompt_speech_token_emb = torch.zeros(1, 0, self.llm_input_size,
                                                   dtype=text.dtype).to(device)
